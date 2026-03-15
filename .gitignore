@@ -1,2 +1,22 @@
 CLAUDE.md
-obsidian/*
+
+# Build output
+preamp
+
+# Test fixtures (275MB of MP3s — too large for git)
+test-music-lib/
+
+# Claude Code local settings
+.claude/
+
+# Jujutsu VCS internals
+.jj/
+
+# Obsidian vault (symlinked, managed separately)
+obsidian/
+
+# Runtime data (SQLite DBs, cover art cache)
+*.db
+*.db-wal
+*.db-shm
+covers/

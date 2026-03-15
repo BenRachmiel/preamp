@@ -1,0 +1,225 @@
+package scanner
+
+import (
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"zombiezen.com/go/sqlite"
+	"zombiezen.com/go/sqlite/sqlitex"
+
+	"github.com/BenRachmiel/preamp/internal/db"
+)
+
+func setupScanner(t *testing.T, musicDir string) (*Scanner, *db.DB) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	coverDir := filepath.Join(tmpDir, "covers")
+	os.MkdirAll(coverDir, 0o755)
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	sc := New(database, musicDir, coverDir, log)
+	return sc, database
+}
+
+func TestScanRealLibrary(t *testing.T) {
+	musicDir := filepath.Join("..", "..", "test-music-lib")
+	if _, err := os.Stat(musicDir); err != nil {
+		t.Skip("test-music-lib not found, skipping")
+	}
+
+	sc, database := setupScanner(t, musicDir)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if sc.Count() != 29 {
+		t.Errorf("count = %d, want 29", sc.Count())
+	}
+
+	// Verify artists.
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+
+	var artistCount int
+	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM artist`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			artistCount = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if artistCount != 2 {
+		t.Errorf("artists = %d, want 2", artistCount)
+	}
+
+	// Verify albums.
+	var albumCount int
+	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM album`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			albumCount = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if albumCount != 2 {
+		t.Errorf("albums = %d, want 2", albumCount)
+	}
+
+	// Verify album stats were updated.
+	var songCount int
+	sqlitex.ExecuteTransient(conn, `SELECT song_count FROM album ORDER BY name LIMIT 1`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			songCount = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if songCount != 19 {
+		t.Errorf("ABBA Gold song_count = %d, want 19", songCount)
+	}
+
+	// Verify FTS populated.
+	var ftsCount int
+	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM song_fts`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			ftsCount = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if ftsCount != 29 {
+		t.Errorf("FTS entries = %d, want 29", ftsCount)
+	}
+
+	// Verify FTS search works.
+	var ftsHits int
+	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM song_fts WHERE song_fts MATCH '"dancing"'`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			ftsHits = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if ftsHits != 1 {
+		t.Errorf("FTS hits for 'dancing' = %d, want 1", ftsHits)
+	}
+}
+
+func TestScanEmptyDir(t *testing.T) {
+	emptyDir := t.TempDir()
+	sc, _ := setupScanner(t, emptyDir)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("Run on empty dir: %v", err)
+	}
+	if sc.Count() != 0 {
+		t.Errorf("count = %d, want 0", sc.Count())
+	}
+}
+
+func TestScanConcurrentBlocked(t *testing.T) {
+	musicDir := filepath.Join("..", "..", "test-music-lib")
+	if _, err := os.Stat(musicDir); err != nil {
+		t.Skip("test-music-lib not found, skipping")
+	}
+
+	sc, _ := setupScanner(t, musicDir)
+
+	// Start a scan in the background.
+	done := make(chan error, 1)
+	go func() { done <- sc.Run() }()
+
+	// Wait until the first scan is actively running.
+	for !sc.Scanning() {
+		// spin until the background goroutine sets Scanning() = true
+	}
+
+	// A concurrent scan should be rejected.
+	err := sc.Run()
+	if err == nil {
+		t.Error("expected error when starting a concurrent scan")
+	}
+
+	// Wait for original scan to finish.
+	if firstErr := <-done; firstErr != nil {
+		t.Fatalf("original scan failed: %v", firstErr)
+	}
+}
+
+func TestScanIdempotent(t *testing.T) {
+	musicDir := filepath.Join("..", "..", "test-music-lib")
+	if _, err := os.Stat(musicDir); err != nil {
+		t.Skip("test-music-lib not found, skipping")
+	}
+
+	sc, database := setupScanner(t, musicDir)
+
+	// First scan.
+	if err := sc.Run(); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Second scan should be idempotent.
+	if err := sc.Run(); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+
+	// Should still have exactly 29 songs, not duplicates.
+	var songCount int
+	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM song`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			songCount = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if songCount != 29 {
+		t.Errorf("songs after rescan = %d, want 29", songCount)
+	}
+}
+
+func TestSupportedExts(t *testing.T) {
+	expected := []string{".mp3", ".flac", ".ogg", ".m4a", ".opus", ".wma", ".wav", ".aac"}
+	for _, ext := range expected {
+		t.Run(ext, func(t *testing.T) {
+			if _, ok := supportedExts[ext]; !ok {
+				t.Errorf("missing supported ext %q", ext)
+			}
+		})
+	}
+}
+
+func TestReadTrackFallbackNoTags(t *testing.T) {
+	// Create a dummy file with no valid tags.
+	tmpDir := t.TempDir()
+	fpath := filepath.Join(tmpDir, "test.mp3")
+	os.WriteFile(fpath, []byte("not a real mp3"), 0o644)
+
+	info, err := readTrack(fpath, ".mp3", "audio/mpeg")
+	if err != nil {
+		t.Fatalf("readTrack: %v", err)
+	}
+
+	if info.title != "test" {
+		t.Errorf("title = %q, want %q", info.title, "test")
+	}
+	if info.artist != "Unknown Artist" {
+		t.Errorf("artist = %q, want %q", info.artist, "Unknown Artist")
+	}
+	if info.ext != "mp3" {
+		t.Errorf("ext = %q, want %q", info.ext, "mp3")
+	}
+}
