@@ -167,6 +167,53 @@ func TestGetSongMissingID(t *testing.T) {
 	}
 }
 
+func TestCoverArtIDFormat(t *testing.T) {
+	srv := testServer(t)
+	seedDataWithFiles(t, srv)
+
+	// Album response should return "al-{albumID}", not a filesystem path.
+	resp := getJSON(t, srv, "/rest/getAlbum?id=alb1")
+	album := resp["album"].(map[string]any)
+	coverArt := album["coverArt"].(string)
+	if coverArt != "al-alb1" {
+		t.Errorf("album coverArt = %q, want %q", coverArt, "al-alb1")
+	}
+
+	// Song response should also use the al- prefix.
+	songs := album["song"].([]any)
+	songCover := songs[0].(map[string]any)["coverArt"].(string)
+	if songCover != "al-alb1" {
+		t.Errorf("song coverArt = %q, want %q", songCover, "al-alb1")
+	}
+
+	// Artist's album listing should also use al- prefix.
+	resp = getJSON(t, srv, "/rest/getArtist?id=art1")
+	artist := resp["artist"].(map[string]any)
+	albums := artist["album"].([]any)
+	artistAlbumCover := albums[0].(map[string]any)["coverArt"].(string)
+	if artistAlbumCover != "al-alb1" {
+		t.Errorf("artist album coverArt = %q, want %q", artistAlbumCover, "al-alb1")
+	}
+}
+
+func TestCoverArtOmittedWhenNoCover(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv) // no cover_art set in DB
+
+	// Album with no cover should omit coverArt field entirely.
+	resp := getJSON(t, srv, "/rest/getAlbum?id=alb1")
+	album := resp["album"].(map[string]any)
+	if _, exists := album["coverArt"]; exists {
+		t.Errorf("album coverArt should be omitted when no cover, got %v", album["coverArt"])
+	}
+
+	// Song with no cover should also omit coverArt.
+	songs := album["song"].([]any)
+	if _, exists := songs[0].(map[string]any)["coverArt"]; exists {
+		t.Errorf("song coverArt should be omitted when no cover, got %v", songs[0].(map[string]any)["coverArt"])
+	}
+}
+
 func TestGetGenres(t *testing.T) {
 	srv := testServer(t)
 	seedData(t, srv)

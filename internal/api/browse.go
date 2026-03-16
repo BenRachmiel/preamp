@@ -276,18 +276,21 @@ func (s *Server) handleGetGenres(w http.ResponseWriter, r *http.Request) {
 //
 //	al.cover_art, al.song_count, al.duration, al.created_at
 func albumFromRow(stmt *sqlite.Stmt) AlbumID3 {
-	return AlbumID3{
+	a := AlbumID3{
 		ID:        stmt.ColumnText(0),
 		Name:      stmt.ColumnText(1),
 		Artist:    stmt.ColumnText(2),
 		ArtistID:  stmt.ColumnText(3),
 		Year:      stmt.ColumnInt(4),
 		Genre:     stmt.ColumnText(5),
-		CoverArt:  stmt.ColumnText(6),
 		SongCount: stmt.ColumnInt(7),
 		Duration:  stmt.ColumnInt(8),
 		Created:   stmt.ColumnText(9),
 	}
+	if stmt.ColumnText(6) != "" {
+		a.CoverArt = "al-" + a.ID
+	}
+	return a
 }
 
 // songFromRow maps a standard 17-column song query result to SongID3.
@@ -296,7 +299,7 @@ func albumFromRow(stmt *sqlite.Stmt) AlbumID3 {
 //	s.duration, s.size, s.suffix, s.bitrate, s.content_type, s.path,
 //	a.name, a.id, al.name, al.id, al.cover_art
 func songFromRow(stmt *sqlite.Stmt) SongID3 {
-	return SongID3{
+	s := SongID3{
 		ID:          stmt.ColumnText(0),
 		Title:       stmt.ColumnText(1),
 		Track:       stmt.ColumnInt(2),
@@ -313,9 +316,12 @@ func songFromRow(stmt *sqlite.Stmt) SongID3 {
 		ArtistID:    stmt.ColumnText(13),
 		Album:       stmt.ColumnText(14),
 		AlbumID:     stmt.ColumnText(15),
-		CoverArt:    stmt.ColumnText(16),
 		Type:        "music",
 	}
+	if stmt.ColumnText(16) != "" {
+		s.CoverArt = "al-" + s.AlbumID
+	}
+	return s
 }
 
 func indexLetter(name string) string {

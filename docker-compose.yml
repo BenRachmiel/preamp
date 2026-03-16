@@ -7,10 +7,12 @@ services:
       PREAMP_MUSIC_DIR: /music
       PREAMP_DATA_DIR: /data
       PREAMP_LISTEN: ":4533"
-      # PREAMP_ENCRYPTION_KEY: "generate-a-32-char-hex-key"
+      PREAMP_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      PREAMP_DEV_USERNAME: ben
+      PREAMP_DEV_PASSWORD: preamp
       # PREAMP_NO_AUTH: "1"  # dev only
     volumes:
-      - ./music:/music:ro
+      - /home/bbr/okd-pvc-backups/navidrome/music:/music:ro
       - preamp-data:/data
     restart: unless-stopped
 

@@ -20,3 +20,6 @@ obsidian/
 *.db-wal
 *.db-shm
 covers/
+
+# Dev environment
+dev.env
