@@ -495,7 +495,7 @@ func TestGetRandomSongs(t *testing.T) {
 
 func TestGetStarred2Empty(t *testing.T) {
 	srv := testServer(t)
-	resp := getJSON(t, srv, "/rest/getStarred2?")
+	resp := getJSON(t, srv, "/rest/getStarred2?u=testuser")
 
 	st := resp["starred2"].(map[string]any)
 	if artists := st["artist"].([]any); len(artists) != 0 {
@@ -1191,9 +1191,8 @@ func TestAuthLegacyHexEncoded(t *testing.T) {
 
 func TestAuthMissingUsername(t *testing.T) {
 	srv := testServerWithAuth(t, "alice", "secret123")
-	url := "/rest/ping?f=json"
 
-	resp := getJSON(t, srv, url)
+	resp := getJSON(t, srv, "/rest/ping?")
 	if resp["status"] != "failed" {
 		t.Errorf("expected failed status for missing username")
 	}
@@ -1339,5 +1338,236 @@ func TestGetCoverArtSizeClamped(t *testing.T) {
 	unclamped := filepath.Join(srv.cfg.CoverArtDir, "alb1_1.jpg")
 	if _, err := os.Stat(unclamped); err == nil {
 		t.Errorf("size=1 should have been clamped, but alb1_1.jpg exists")
+	}
+}
+
+// --- Star/unstar annotation tests ---
+
+func TestStarSong(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	resp := getJSON(t, srv, "/rest/star?u=testuser&id=s1")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+
+	// Verify it shows up in getStarred2.
+	starred := getJSON(t, srv, "/rest/getStarred2?u=testuser")
+	st := starred["starred2"].(map[string]any)
+	songs := st["song"].([]any)
+	if len(songs) != 1 {
+		t.Fatalf("expected 1 starred song, got %d", len(songs))
+	}
+	s := songs[0].(map[string]any)
+	if s["title"] != "Dancing Queen" {
+		t.Errorf("starred song title = %v, want Dancing Queen", s["title"])
+	}
+}
+
+func TestStarAlbum(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	resp := getJSON(t, srv, "/rest/star?u=testuser&albumId=alb1")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+
+	starred := getJSON(t, srv, "/rest/getStarred2?u=testuser")
+	st := starred["starred2"].(map[string]any)
+	albums := st["album"].([]any)
+	if len(albums) != 1 {
+		t.Fatalf("expected 1 starred album, got %d", len(albums))
+	}
+	a := albums[0].(map[string]any)
+	if a["name"] != "Gold" {
+		t.Errorf("starred album name = %v, want Gold", a["name"])
+	}
+}
+
+func TestStarArtist(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	resp := getJSON(t, srv, "/rest/star?u=testuser&artistId=art1")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+
+	starred := getJSON(t, srv, "/rest/getStarred2?u=testuser")
+	st := starred["starred2"].(map[string]any)
+	artists := st["artist"].([]any)
+	if len(artists) != 1 {
+		t.Fatalf("expected 1 starred artist, got %d", len(artists))
+	}
+	a := artists[0].(map[string]any)
+	if a["name"] != "ABBA" {
+		t.Errorf("starred artist name = %v, want ABBA", a["name"])
+	}
+}
+
+func TestStarMissingParams(t *testing.T) {
+	srv := testServer(t)
+
+	resp := getJSON(t, srv, "/rest/star?u=testuser")
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for missing star params")
+	}
+	apiErr := resp["error"].(map[string]any)
+	if apiErr["code"].(float64) != 10 {
+		t.Errorf("error code = %v, want 10", apiErr["code"])
+	}
+}
+
+func TestStarIdempotent(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	// Star the same song twice — should not error or create duplicates.
+	getJSON(t, srv, "/rest/star?u=testuser&id=s1")
+	resp := getJSON(t, srv, "/rest/star?u=testuser&id=s1")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok on duplicate star", resp["status"])
+	}
+
+	starred := getJSON(t, srv, "/rest/getStarred2?u=testuser")
+	st := starred["starred2"].(map[string]any)
+	songs := st["song"].([]any)
+	if len(songs) != 1 {
+		t.Errorf("expected 1 starred song after duplicate star, got %d", len(songs))
+	}
+}
+
+func TestUnstarSong(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	// Star then unstar.
+	getJSON(t, srv, "/rest/star?u=testuser&id=s1")
+	resp := getJSON(t, srv, "/rest/unstar?u=testuser&id=s1")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+
+	// Verify it's gone from getStarred2.
+	starred := getJSON(t, srv, "/rest/getStarred2?u=testuser")
+	st := starred["starred2"].(map[string]any)
+	songs := st["song"].([]any)
+	if len(songs) != 0 {
+		t.Errorf("expected 0 starred songs after unstar, got %d", len(songs))
+	}
+}
+
+func TestUnstarMissingParams(t *testing.T) {
+	srv := testServer(t)
+
+	resp := getJSON(t, srv, "/rest/unstar?u=testuser")
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for missing unstar params")
+	}
+	apiErr := resp["error"].(map[string]any)
+	if apiErr["code"].(float64) != 10 {
+		t.Errorf("error code = %v, want 10", apiErr["code"])
+	}
+}
+
+func TestUnstarNonexistent(t *testing.T) {
+	srv := testServer(t)
+
+	// Unstarring something that was never starred should succeed silently.
+	resp := getJSON(t, srv, "/rest/unstar?u=testuser&id=nonexistent")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok for unstarring nonexistent item", resp["status"])
+	}
+}
+
+func TestStarredPerUser(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	// User A stars a song.
+	getJSON(t, srv, "/rest/star?u=alice&id=s1")
+
+	// User B should see no starred songs.
+	starred := getJSON(t, srv, "/rest/getStarred2?u=bob")
+	st := starred["starred2"].(map[string]any)
+	songs := st["song"].([]any)
+	if len(songs) != 0 {
+		t.Errorf("expected 0 starred songs for bob, got %d", len(songs))
+	}
+
+	// User A should see 1.
+	starred = getJSON(t, srv, "/rest/getStarred2?u=alice")
+	st = starred["starred2"].(map[string]any)
+	songs = st["song"].([]any)
+	if len(songs) != 1 {
+		t.Errorf("expected 1 starred song for alice, got %d", len(songs))
+	}
+}
+
+func TestGetStarred2EmptyNoStars(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	resp := getJSON(t, srv, "/rest/getStarred2?u=testuser")
+	st := resp["starred2"].(map[string]any)
+	if artists := st["artist"].([]any); len(artists) != 0 {
+		t.Errorf("expected 0 starred artists, got %d", len(artists))
+	}
+	if albums := st["album"].([]any); len(albums) != 0 {
+		t.Errorf("expected 0 starred albums, got %d", len(albums))
+	}
+	if songs := st["song"].([]any); len(songs) != 0 {
+		t.Errorf("expected 0 starred songs, got %d", len(songs))
+	}
+}
+
+func TestGetAlbumList2Starred(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	// Star one album.
+	getJSON(t, srv, "/rest/star?u=testuser&albumId=alb1")
+
+	resp := getJSON(t, srv, "/rest/getAlbumList2?type=starred&u=testuser")
+	al := resp["albumList2"].(map[string]any)
+	albums := al["album"].([]any)
+	if len(albums) != 1 {
+		t.Fatalf("expected 1 starred album, got %d", len(albums))
+	}
+	a := albums[0].(map[string]any)
+	if a["name"] != "Gold" {
+		t.Errorf("starred album name = %v, want Gold", a["name"])
+	}
+}
+
+func TestGetAlbumList2StarredEmpty(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	resp := getJSON(t, srv, "/rest/getAlbumList2?type=starred&u=testuser")
+	al := resp["albumList2"].(map[string]any)
+	albums := al["album"].([]any)
+	if len(albums) != 0 {
+		t.Errorf("expected 0 starred albums, got %d", len(albums))
+	}
+}
+
+func TestStarMultipleItems(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	// Star two songs at once.
+	resp := getJSON(t, srv, "/rest/star?u=testuser&id=s1&id=s2")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+
+	starred := getJSON(t, srv, "/rest/getStarred2?u=testuser")
+	st := starred["starred2"].(map[string]any)
+	songs := st["song"].([]any)
+	if len(songs) != 2 {
+		t.Errorf("expected 2 starred songs, got %d", len(songs))
 	}
 }

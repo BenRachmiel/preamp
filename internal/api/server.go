@@ -71,6 +71,10 @@ func (s *Server) routes() {
 	sub("getStarred2", s.handleGetStarred2)
 	sub("getSongsByGenre", s.handleGetSongsByGenre)
 
+	// Annotation
+	sub("star", s.handleStar)
+	sub("unstar", s.handleUnstar)
+
 	// Scanning
 	sub("startScan", s.handleStartScan)
 	sub("getScanStatus", s.handleGetScanStatus)

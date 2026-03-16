@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -13,11 +14,43 @@ import (
 	"zombiezen.com/go/sqlite/sqlitex"
 )
 
+type contextKey string
+
+const usernameKey contextKey = "username"
+
+// usernameFromRequest returns the authenticated username from context,
+// falling back to the "u" query param (for auth-disabled mode).
+func usernameFromRequest(r *http.Request) string {
+	if u, ok := r.Context().Value(usernameKey).(string); ok && u != "" {
+		return u
+	}
+	return r.FormValue("u")
+}
+
+// requireUsername extracts the authenticated username or writes a Subsonic
+// error and returns false. Use at the top of per-user handlers.
+func requireUsername(w http.ResponseWriter, r *http.Request) (string, bool) {
+	u := usernameFromRequest(r)
+	if u == "" {
+		writeError(w, r, 10, "missing parameter: u")
+		return "", false
+	}
+	return u, true
+}
+
 // authMiddleware wraps the server mux and enforces Subsonic credential auth.
 // Auth is on by default. Set PREAMP_NO_AUTH=1 to explicitly disable (dev only).
+// Anonymous endpoints (ping, getLicense, etc.) work without u=.
+// Per-user endpoints must call usernameFromRequest and validate non-empty.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	if s.cfg.AuthDisabled {
+		s.log.Warn("auth disabled — all requests accepted without credential check")
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.AuthDisabled {
+			if u := r.FormValue("u"); u != "" {
+				r = r.WithContext(context.WithValue(r.Context(), usernameKey, u))
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -34,6 +67,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		authedReq := r.WithContext(context.WithValue(r.Context(), usernameKey, username))
+
 		// Token auth: t=md5(password+salt), s=salt
 		if token := r.FormValue("t"); token != "" {
 			salt := r.FormValue("s")
@@ -42,7 +77,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				writeError(w, r, 40, "wrong username or password")
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, authedReq)
 			return
 		}
 
@@ -61,7 +96,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				writeError(w, r, 40, "wrong username or password")
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, authedReq)
 			return
 		}
 

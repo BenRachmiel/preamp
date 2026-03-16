@@ -82,8 +82,21 @@ func (s *Server) handleGetAlbumList2(w http.ResponseWriter, r *http.Request) {
 			WHERE al.genre = ?
 			ORDER BY al.name COLLATE NOCASE LIMIT ? OFFSET ?`
 		args = []any{genre, size, offset}
+	case "starred":
+		username, have := requireUsername(w, r)
+		if !have {
+			return
+		}
+		query = `
+			SELECT al.id, al.name, a.name, a.id, al.year, al.genre,
+			       al.cover_art, al.song_count, al.duration, al.created_at
+			FROM star st
+			JOIN album al ON al.id = st.item_id
+			JOIN artist a ON a.id = al.artist_id
+			WHERE st.user_id = ? AND st.item_type = ?
+			ORDER BY st.created_at DESC LIMIT ? OFFSET ?`
+		args = []any{username, itemTypeAlbum, size, offset}
 	case "recent", "frequent":
-		// TODO: implement once play_history is wired up. Return empty for now.
 		resp := ok()
 		resp.AlbumList2 = &AlbumList2{Albums: []AlbumID3{}}
 		writeResponse(w, r, resp)
@@ -151,13 +164,95 @@ func (s *Server) handleGetRandomSongs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetStarred2(w http.ResponseWriter, r *http.Request) {
-	// Return empty until star/unstar is implemented.
-	resp := ok()
-	resp.Starred2 = &Starred2{
+	username, have := requireUsername(w, r)
+	if !have {
+		return
+	}
+
+	conn, put, err := s.db.ReadConn()
+	if err != nil {
+		writeError(w, r, 0, "database error")
+		return
+	}
+	defer put()
+
+	result := Starred2{
 		Artists: []ArtistID3{},
 		Albums:  []AlbumID3{},
 		Songs:   []SongID3{},
 	}
+
+	// Starred artists
+	err = sqlitex.ExecuteTransient(conn, `
+		SELECT a.id, a.name, COUNT(al.id) as album_count, st.created_at
+		FROM star st
+		JOIN artist a ON a.id = st.item_id
+		LEFT JOIN album al ON al.artist_id = a.id
+		WHERE st.user_id = ? AND st.item_type = ?
+		GROUP BY a.id
+		ORDER BY st.created_at DESC
+	`, &sqlitex.ExecOptions{
+		Args: []any{username, itemTypeArtist},
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			result.Artists = append(result.Artists, ArtistID3{
+				ID:         stmt.ColumnText(0),
+				Name:       stmt.ColumnText(1),
+				AlbumCount: stmt.ColumnInt(2),
+			})
+			return nil
+		},
+	})
+	if err != nil {
+		writeError(w, r, 0, "query error")
+		return
+	}
+
+	// Starred albums
+	err = sqlitex.ExecuteTransient(conn, `
+		SELECT al.id, al.name, a.name, a.id, al.year, al.genre,
+		       al.cover_art, al.song_count, al.duration, al.created_at
+		FROM star st
+		JOIN album al ON al.id = st.item_id
+		JOIN artist a ON a.id = al.artist_id
+		WHERE st.user_id = ? AND st.item_type = ?
+		ORDER BY st.created_at DESC
+	`, &sqlitex.ExecOptions{
+		Args: []any{username, itemTypeAlbum},
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			result.Albums = append(result.Albums, albumFromRow(stmt))
+			return nil
+		},
+	})
+	if err != nil {
+		writeError(w, r, 0, "query error")
+		return
+	}
+
+	// Starred songs
+	err = sqlitex.ExecuteTransient(conn, `
+		SELECT s.id, s.title, s.track, s.disc, s.year, s.genre,
+		       s.duration, s.size, s.suffix, s.bitrate, s.content_type, s.path,
+		       a.name, a.id, al.name, al.id, al.cover_art
+		FROM star st
+		JOIN song s ON s.id = st.item_id
+		JOIN artist a ON a.id = s.artist_id
+		JOIN album al ON al.id = s.album_id
+		WHERE st.user_id = ? AND st.item_type = ?
+		ORDER BY st.created_at DESC
+	`, &sqlitex.ExecOptions{
+		Args: []any{username, itemTypeSong},
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			result.Songs = append(result.Songs, songFromRow(stmt))
+			return nil
+		},
+	})
+	if err != nil {
+		writeError(w, r, 0, "query error")
+		return
+	}
+
+	resp := ok()
+	resp.Starred2 = &result
 	writeResponse(w, r, resp)
 }
 

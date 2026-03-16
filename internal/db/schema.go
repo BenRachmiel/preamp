@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS star (
 	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
 	UNIQUE(user_id, item_id, item_type)
 );
+CREATE INDEX IF NOT EXISTS idx_star_user_type ON star(user_id, item_type);
 
 CREATE TABLE IF NOT EXISTS play_history (
 	id        TEXT PRIMARY KEY,
