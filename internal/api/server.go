@@ -74,6 +74,21 @@ func (s *Server) routes() {
 	// Annotation
 	sub("star", s.handleStar)
 	sub("unstar", s.handleUnstar)
+	sub("scrobble", s.handleScrobble)
+	sub("setRating", s.handleSetRating)
+
+	// Playlists
+	sub("getPlaylists", s.handleGetPlaylists)
+	sub("getPlaylist", s.handleGetPlaylist)
+	sub("createPlaylist", s.handleCreatePlaylist)
+	sub("updatePlaylist", s.handleUpdatePlaylist)
+	sub("deletePlaylist", s.handleDeletePlaylist)
+
+	// Info
+	sub("getArtistInfo2", s.handleGetArtistInfo2)
+	sub("getAlbumInfo2", s.handleGetAlbumInfo2)
+	sub("getSimilarSongs2", s.handleGetSimilarSongs2)
+	sub("getTopSongs", s.handleGetTopSongs)
 
 	// Scanning
 	sub("startScan", s.handleStartScan)

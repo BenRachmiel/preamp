@@ -180,6 +180,9 @@ func (s *Server) handleGetAlbum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	username := usernameFromRequest(r)
+	decorateRatings(conn, username, album.Songs)
+
 	resp := ok()
 	resp.Album = &album
 	writeResponse(w, r, resp)
@@ -222,6 +225,11 @@ func (s *Server) handleGetSong(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 70, "song not found")
 		return
 	}
+
+	username := usernameFromRequest(r)
+	songs := []SongID3{song}
+	decorateRatings(conn, username, songs)
+	song = songs[0]
 
 	resp := ok()
 	resp.Song = &song

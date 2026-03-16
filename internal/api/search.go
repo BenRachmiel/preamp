@@ -105,6 +105,9 @@ func (s *Server) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	username := usernameFromRequest(r)
+	decorateRatings(conn, username, result.Songs)
+
 	resp := ok()
 	resp.SearchResult3 = &result
 	writeResponse(w, r, resp)

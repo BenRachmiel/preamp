@@ -34,6 +34,12 @@ type SubsonicResponse struct {
 	Starred2           *Starred2              `xml:"starred2,omitempty" json:"starred2,omitempty"`
 	SongsByGenre       *SongsByGenre          `xml:"songsByGenre,omitempty" json:"songsByGenre,omitempty"`
 	ScanStatus         *ScanStatus            `xml:"scanStatus,omitempty" json:"scanStatus,omitempty"`
+	Playlists          *Playlists             `xml:"playlists,omitempty" json:"playlists,omitempty"`
+	Playlist           *PlaylistWithSongs     `xml:"playlist,omitempty" json:"playlist,omitempty"`
+	ArtistInfo2        *ArtistInfo2           `xml:"artistInfo2,omitempty" json:"artistInfo2,omitempty"`
+	AlbumInfo          *AlbumInfo             `xml:"albumInfo,omitempty" json:"albumInfo,omitempty"`
+	TopSongs           *TopSongs              `xml:"topSongs,omitempty" json:"topSongs,omitempty"`
+	SimilarSongs2      *SimilarSongs2         `xml:"similarSongs2,omitempty" json:"similarSongs2,omitempty"`
 }
 
 type APIError struct {
@@ -130,6 +136,7 @@ type SongID3 struct {
 	Path        string `xml:"path,attr,omitempty" json:"path,omitempty"`
 	CoverArt    string `xml:"coverArt,attr,omitempty" json:"coverArt,omitempty"`
 	Type        string `xml:"type,attr,omitempty" json:"type,omitempty"`
+	UserRating  int    `xml:"userRating,attr,omitempty" json:"userRating,omitempty"`
 }
 
 type Genres struct {
@@ -169,6 +176,58 @@ type SongsByGenre struct {
 type ScanStatus struct {
 	Scanning bool `xml:"scanning,attr" json:"scanning"`
 	Count    int  `xml:"count,attr,omitempty" json:"count,omitempty"`
+}
+
+// --- Playlist types ---
+
+type PlaylistEntry struct {
+	ID        string `xml:"id,attr" json:"id"`
+	Name      string `xml:"name,attr" json:"name"`
+	Comment   string `xml:"comment,attr" json:"comment"`
+	SongCount int    `xml:"songCount,attr" json:"songCount"`
+	Duration  int    `xml:"duration,attr" json:"duration"`
+	Owner     string `xml:"owner,attr" json:"owner"`
+	Public    bool   `xml:"public,attr" json:"public"`
+	Created   string `xml:"created,attr" json:"created"`
+	Changed   string `xml:"changed,attr" json:"changed"`
+}
+
+type Playlists struct {
+	Playlists []PlaylistEntry `xml:"playlist" json:"playlist"`
+}
+
+type PlaylistWithSongs struct {
+	PlaylistEntry
+	Songs []SongID3 `xml:"entry" json:"entry"`
+}
+
+// --- Info types ---
+
+type ArtistInfo2 struct {
+	Biography      string      `xml:"biography,omitempty" json:"biography,omitempty"`
+	MusicBrainzID  string      `xml:"musicBrainzId,omitempty" json:"musicBrainzId,omitempty"`
+	LastFmURL      string      `xml:"lastFmUrl,omitempty" json:"lastFmUrl,omitempty"`
+	SmallImageURL  string      `xml:"smallImageUrl,omitempty" json:"smallImageUrl,omitempty"`
+	MediumImageURL string      `xml:"mediumImageUrl,omitempty" json:"mediumImageUrl,omitempty"`
+	LargeImageURL  string      `xml:"largeImageUrl,omitempty" json:"largeImageUrl,omitempty"`
+	SimilarArtist  []ArtistID3 `xml:"similarArtist" json:"similarArtist"`
+}
+
+type AlbumInfo struct {
+	Notes          string `xml:"notes,omitempty" json:"notes,omitempty"`
+	MusicBrainzID  string `xml:"musicBrainzId,omitempty" json:"musicBrainzId,omitempty"`
+	LastFmURL      string `xml:"lastFmUrl,omitempty" json:"lastFmUrl,omitempty"`
+	SmallImageURL  string `xml:"smallImageUrl,omitempty" json:"smallImageUrl,omitempty"`
+	MediumImageURL string `xml:"mediumImageUrl,omitempty" json:"mediumImageUrl,omitempty"`
+	LargeImageURL  string `xml:"largeImageUrl,omitempty" json:"largeImageUrl,omitempty"`
+}
+
+type TopSongs struct {
+	Songs []SongID3 `xml:"song" json:"song"`
+}
+
+type SimilarSongs2 struct {
+	Songs []SongID3 `xml:"song" json:"song"`
 }
 
 // --- Response helpers ---

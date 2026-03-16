@@ -1,0 +1,10 @@
+.git
+.jj
+.claude
+obsidian
+test-music-lib
+*.db
+*.db-wal
+*.db-shm
+covers/
+CLAUDE.md

@@ -1,0 +1,18 @@
+services:
+  preamp:
+    build: .
+    ports:
+      - "4533:4533"
+    environment:
+      PREAMP_MUSIC_DIR: /music
+      PREAMP_DATA_DIR: /data
+      PREAMP_LISTEN: ":4533"
+      # PREAMP_ENCRYPTION_KEY: "generate-a-32-char-hex-key"
+      # PREAMP_NO_AUTH: "1"  # dev only
+    volumes:
+      - ./music:/music:ro
+      - preamp-data:/data
+    restart: unless-stopped
+
+volumes:
+  preamp-data:

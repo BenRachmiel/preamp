@@ -76,4 +76,30 @@ CREATE TABLE IF NOT EXISTS play_history (
 	played_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_play_history_played ON play_history(played_at);
+CREATE INDEX IF NOT EXISTS idx_play_history_user_song ON play_history(user_id, song_id);
+
+CREATE TABLE IF NOT EXISTS playlist (
+	id         TEXT PRIMARY KEY,
+	user_id    TEXT NOT NULL,
+	name       TEXT NOT NULL,
+	comment    TEXT NOT NULL DEFAULT '',
+	public     INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+	updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_playlist_user ON playlist(user_id);
+
+CREATE TABLE IF NOT EXISTS playlist_song (
+	playlist_id TEXT NOT NULL REFERENCES playlist(id) ON DELETE CASCADE,
+	song_id     TEXT NOT NULL REFERENCES song(id),
+	position    INTEGER NOT NULL,
+	PRIMARY KEY (playlist_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS rating (
+	user_id TEXT NOT NULL,
+	item_id TEXT NOT NULL,
+	rating  INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+	PRIMARY KEY(user_id, item_id)
+);
 `

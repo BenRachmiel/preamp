@@ -96,11 +96,38 @@ func (s *Server) handleGetAlbumList2(w http.ResponseWriter, r *http.Request) {
 			WHERE st.user_id = ? AND st.item_type = ?
 			ORDER BY st.created_at DESC LIMIT ? OFFSET ?`
 		args = []any{username, itemTypeAlbum, size, offset}
-	case "recent", "frequent":
-		resp := ok()
-		resp.AlbumList2 = &AlbumList2{Albums: []AlbumID3{}}
-		writeResponse(w, r, resp)
-		return
+	case "recent":
+		username, have := requireUsername(w, r)
+		if !have {
+			return
+		}
+		query = `
+			SELECT al.id, al.name, a.name, a.id, al.year, al.genre,
+			       al.cover_art, al.song_count, al.duration, al.created_at
+			FROM play_history ph
+			JOIN song s ON s.id = ph.song_id
+			JOIN album al ON al.id = s.album_id
+			JOIN artist a ON a.id = al.artist_id
+			WHERE ph.user_id = ?
+			GROUP BY al.id
+			ORDER BY MAX(ph.played_at) DESC LIMIT ? OFFSET ?`
+		args = []any{username, size, offset}
+	case "frequent":
+		username, have := requireUsername(w, r)
+		if !have {
+			return
+		}
+		query = `
+			SELECT al.id, al.name, a.name, a.id, al.year, al.genre,
+			       al.cover_art, al.song_count, al.duration, al.created_at
+			FROM play_history ph
+			JOIN song s ON s.id = ph.song_id
+			JOIN album al ON al.id = s.album_id
+			JOIN artist a ON a.id = al.artist_id
+			WHERE ph.user_id = ?
+			GROUP BY al.id
+			ORDER BY COUNT(*) DESC LIMIT ? OFFSET ?`
+		args = []any{username, size, offset}
 	default:
 		writeError(w, r, 0, "unknown list type: "+listType)
 		return
@@ -157,6 +184,9 @@ func (s *Server) handleGetRandomSongs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 0, "query error")
 		return
 	}
+
+	username := usernameFromRequest(r)
+	decorateRatings(conn, username, songs)
 
 	resp := ok()
 	resp.RandomSongs = &RandomSongs{Songs: songs}
@@ -251,6 +281,8 @@ func (s *Server) handleGetStarred2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	decorateRatings(conn, username, result.Songs)
+
 	resp := ok()
 	resp.Starred2 = &result
 	writeResponse(w, r, resp)
@@ -298,6 +330,9 @@ func (s *Server) handleGetSongsByGenre(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 0, "query error")
 		return
 	}
+
+	username := usernameFromRequest(r)
+	decorateRatings(conn, username, songs)
 
 	resp := ok()
 	resp.SongsByGenre = &SongsByGenre{Songs: songs}
