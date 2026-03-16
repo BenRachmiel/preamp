@@ -10,9 +10,12 @@ import (
 	"time"
 
 	"github.com/BenRachmiel/preamp/internal/api"
+	"github.com/BenRachmiel/preamp/internal/auth"
 	"github.com/BenRachmiel/preamp/internal/config"
 	"github.com/BenRachmiel/preamp/internal/db"
 	"github.com/BenRachmiel/preamp/internal/scanner"
+
+	"zombiezen.com/go/sqlite/sqlitex"
 )
 
 func main() {
@@ -30,6 +33,22 @@ func main() {
 		os.Exit(1)
 	}
 	defer database.Close()
+
+	if cfg.AuthDisabled {
+		log.Warn("PREAMP_NO_AUTH=1 — auth disabled, all requests pass through")
+	} else if cfg.EncryptionKey == "" {
+		log.Error("PREAMP_ENCRYPTION_KEY is required (or set PREAMP_NO_AUTH=1 to disable auth)")
+		os.Exit(1)
+	}
+
+	// Seed dev credential if configured.
+	if cfg.DevUsername != "" && cfg.DevPassword != "" && cfg.EncryptionKey != "" {
+		if err := seedDevCredential(database, cfg); err != nil {
+			log.Error("seeding dev credential", "err", err)
+			os.Exit(1)
+		}
+		log.Info("dev credential seeded", "username", cfg.DevUsername)
+	}
 
 	srv := api.NewServer(cfg, database, log)
 
@@ -69,4 +88,23 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown error", "err", err)
 	}
+}
+
+func seedDevCredential(database *db.DB, cfg *config.Config) error {
+	encrypted, err := auth.EncryptPassword(cfg.EncryptionKey, cfg.DevPassword)
+	if err != nil {
+		return err
+	}
+
+	conn, put, err := database.WriteConn()
+	if err != nil {
+		return err
+	}
+	defer put()
+
+	return sqlitex.ExecuteTransient(conn,
+		`INSERT INTO credential (id, username, encrypted_password, client_name)
+		 VALUES (?, ?, ?, 'dev')
+		 ON CONFLICT(username) DO UPDATE SET encrypted_password = excluded.encrypted_password`,
+		&sqlitex.ExecOptions{Args: []any{db.NewID(), cfg.DevUsername, encrypted}})
 }

@@ -1,10 +1,14 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/disintegration/imaging"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 )
@@ -69,6 +73,11 @@ func (s *Server) serveAudioFile(w http.ResponseWriter, r *http.Request) {
 
 const coverArtPrefix = "al-"
 
+const (
+	minCoverArtSize = 32
+	maxCoverArtSize = 1024
+)
+
 func (s *Server) handleGetCoverArt(w http.ResponseWriter, r *http.Request) {
 	id := r.FormValue("id")
 	if id == "" {
@@ -102,7 +111,23 @@ func (s *Server) handleGetCoverArt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(coverPath)
+	servePath := coverPath
+
+	// Handle size parameter — lazy resize with disk cache.
+	if sizeStr := r.FormValue("size"); sizeStr != "" {
+		size, parseErr := strconv.Atoi(sizeStr)
+		if parseErr == nil && size > 0 {
+			size = max(minCoverArtSize, min(size, maxCoverArtSize))
+			resized, resizeErr := s.resizedCoverArt(coverPath, size)
+			if resizeErr != nil {
+				s.log.Error("resizing cover art", "path", coverPath, "size", size, "err", resizeErr)
+			} else {
+				servePath = resized
+			}
+		}
+	}
+
+	f, err := os.Open(servePath)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -116,5 +141,49 @@ func (s *Server) handleGetCoverArt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	http.ServeContent(w, r, coverPath, stat.ModTime(), f)
+	http.ServeContent(w, r, servePath, stat.ModTime(), f)
+}
+
+// resizedCoverArt returns the path to a resized cover art image, creating it
+// on demand if it doesn't exist. Cached as {base}_{size}.jpg alongside the original.
+// Uses atomic write (temp file + rename) to avoid serving corrupt files on concurrent requests.
+func (s *Server) resizedCoverArt(originalPath string, size int) (string, error) {
+	dir := filepath.Dir(originalPath)
+	base := strings.TrimSuffix(filepath.Base(originalPath), filepath.Ext(originalPath))
+	resizedPath := filepath.Join(dir, fmt.Sprintf("%s_%d.jpg", base, size))
+
+	// Return cached version if it exists.
+	if _, err := os.Stat(resizedPath); err == nil {
+		return resizedPath, nil
+	}
+
+	src, err := imaging.Open(originalPath)
+	if err != nil {
+		return "", fmt.Errorf("opening image: %w", err)
+	}
+
+	resized := imaging.Fit(src, size, size, imaging.CatmullRom)
+
+	// Write to temp file, then atomic rename to avoid serving partial writes.
+	tmp, err := os.CreateTemp(dir, base+"_*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+
+	if err := imaging.Encode(tmp, resized, imaging.JPEG); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("encoding resized image: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, resizedPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("renaming resized image: %w", err)
+	}
+
+	return resizedPath, nil
 }

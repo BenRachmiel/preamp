@@ -1,8 +1,13 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,23 +17,36 @@ import (
 
 	"zombiezen.com/go/sqlite/sqlitex"
 
+	"github.com/BenRachmiel/preamp/internal/auth"
 	"github.com/BenRachmiel/preamp/internal/config"
 	"github.com/BenRachmiel/preamp/internal/db"
 	"github.com/BenRachmiel/preamp/internal/scanner"
 )
 
+type testServerOpts struct {
+	encryptionKey string // if set, auth is enabled
+}
+
 // testServer sets up a Server with an in-memory-like temp DB and returns it + cleanup.
-func testServer(t *testing.T) *Server {
+// By default auth is disabled. Pass opts to enable auth.
+func testServer(t *testing.T, opts ...testServerOpts) *Server {
 	t.Helper()
 	tmpDir := t.TempDir()
 
 	cfg := &config.Config{
-		ListenAddr:  ":0",
-		MusicDir:    tmpDir,
-		DataDir:     tmpDir,
-		CoverArtDir: tmpDir + "/covers",
-		DBPath:      tmpDir + "/test.db",
+		ListenAddr:   ":0",
+		MusicDir:     tmpDir,
+		DataDir:      tmpDir,
+		CoverArtDir:  tmpDir + "/covers",
+		DBPath:       tmpDir + "/test.db",
+		AuthDisabled: true,
 	}
+
+	if len(opts) > 0 && opts[0].encryptionKey != "" {
+		cfg.AuthDisabled = false
+		cfg.EncryptionKey = opts[0].encryptionKey
+	}
+
 	os.MkdirAll(cfg.CoverArtDir, 0o755)
 
 	database, err := db.Open(cfg.DBPath)
@@ -931,6 +949,117 @@ func TestSearch3AlbumResults(t *testing.T) {
 	}
 }
 
+// --- Cover art resize tests ---
+
+// writeTestJPEG creates a 200x200 JPEG at the given path.
+func writeTestJPEG(t *testing.T, path string) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 200, 200))
+	for y := range 200 {
+		for x := range 200 {
+			img.Set(x, y, color.RGBA{R: 100, G: 150, B: 200, A: 255})
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating test JPEG: %v", err)
+	}
+	defer f.Close()
+	if err := jpeg.Encode(f, img, nil); err != nil {
+		t.Fatalf("encoding test JPEG: %v", err)
+	}
+}
+
+func seedDataWithRealCover(t *testing.T, srv *Server) {
+	t.Helper()
+	conn, put, err := srv.db.WriteConn()
+	if err != nil {
+		t.Fatalf("WriteConn: %v", err)
+	}
+	defer put()
+
+	coverPath := filepath.Join(srv.cfg.CoverArtDir, "alb1.jpg")
+	writeTestJPEG(t, coverPath)
+
+	err = sqlitex.ExecuteTransient(conn,
+		`INSERT INTO artist (id, name) VALUES ('art1', 'ABBA')`, nil)
+	if err != nil {
+		t.Fatalf("seed artist: %v", err)
+	}
+	err = sqlitex.ExecuteTransient(conn,
+		`INSERT INTO album (id, artist_id, name, year, genre, song_count, duration, cover_art)
+		 VALUES ('alb1', 'art1', 'Gold', 1992, 'Pop', 1, 231, ?)`,
+		&sqlitex.ExecOptions{Args: []any{coverPath}})
+	if err != nil {
+		t.Fatalf("seed album: %v", err)
+	}
+}
+
+func TestGetCoverArtResize(t *testing.T) {
+	srv := testServer(t)
+	seedDataWithRealCover(t, srv)
+
+	w := get(t, srv, "/rest/getCoverArt?id=alb1&size=50")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	// Verify the resized file was cached to disk.
+	resizedPath := filepath.Join(srv.cfg.CoverArtDir, "alb1_50.jpg")
+	if _, err := os.Stat(resizedPath); err != nil {
+		t.Errorf("resized file not cached: %v", err)
+	}
+}
+
+func TestGetCoverArtResizeCached(t *testing.T) {
+	srv := testServer(t)
+	seedDataWithRealCover(t, srv)
+
+	// First request creates the cached file.
+	w1 := get(t, srv, "/rest/getCoverArt?id=alb1&size=100")
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first request: status = %d", w1.Code)
+	}
+
+	// Record mtime of the cached file — should not change on second request.
+	resizedPath := filepath.Join(srv.cfg.CoverArtDir, "alb1_100.jpg")
+	stat1, err := os.Stat(resizedPath)
+	if err != nil {
+		t.Fatalf("cached file not found after first request: %v", err)
+	}
+
+	// Second request should serve from cache without regenerating.
+	w2 := get(t, srv, "/rest/getCoverArt?id=alb1&size=100")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second request: status = %d", w2.Code)
+	}
+
+	stat2, err := os.Stat(resizedPath)
+	if err != nil {
+		t.Fatalf("cached file disappeared: %v", err)
+	}
+	if !stat1.ModTime().Equal(stat2.ModTime()) {
+		t.Errorf("cached file was regenerated: mtime changed from %v to %v", stat1.ModTime(), stat2.ModTime())
+	}
+}
+
+func TestGetCoverArtNoSize(t *testing.T) {
+	srv := testServer(t)
+	seedDataWithRealCover(t, srv)
+
+	// Without size param, should serve original.
+	w := get(t, srv, "/rest/getCoverArt?id=alb1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	// No resized files should exist.
+	matches, _ := filepath.Glob(filepath.Join(srv.cfg.CoverArtDir, "alb1_*.jpg"))
+	if len(matches) != 0 {
+		t.Errorf("unexpected resized files: %v", matches)
+	}
+}
+
 // --- POST method routing ---
 
 func TestPingPOST(t *testing.T) {
@@ -963,5 +1092,252 @@ func TestPingViewSuffixPOST(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d for POST .view suffix", w.Code)
+	}
+}
+
+// --- Auth middleware tests ---
+
+const testEncryptionKey = "0123456789abcdef0123456789abcdef" // 32 hex chars = 16 bytes
+
+// testServerWithAuth sets up a server with auth enabled and a seeded credential.
+func testServerWithAuth(t *testing.T, username, password string) *Server {
+	t.Helper()
+	srv := testServer(t, testServerOpts{encryptionKey: testEncryptionKey})
+
+	encrypted, err := auth.EncryptPassword(testEncryptionKey, password)
+	if err != nil {
+		t.Fatalf("EncryptPassword: %v", err)
+	}
+
+	conn, put, err := srv.db.WriteConn()
+	if err != nil {
+		t.Fatalf("WriteConn: %v", err)
+	}
+	err = sqlitex.ExecuteTransient(conn,
+		`INSERT INTO credential (id, username, encrypted_password, client_name) VALUES (?, ?, ?, 'test')`,
+		&sqlitex.ExecOptions{Args: []any{db.NewID(), username, encrypted}})
+	put()
+	if err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	return srv
+}
+
+func TestAuthTokenSuccess(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+	salt := "randomsalt"
+	token := md5Hex("secret123" + salt)
+	url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=%s&s=%s", token, salt)
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+}
+
+func TestAuthTokenWrongPassword(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+	salt := "randomsalt"
+	token := md5Hex("wrongpassword" + salt)
+	url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=%s&s=%s", token, salt)
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for wrong token")
+	}
+	apiErr := resp["error"].(map[string]any)
+	if apiErr["code"].(float64) != 40 {
+		t.Errorf("error code = %v, want 40", apiErr["code"])
+	}
+}
+
+func TestAuthTokenWrongUsername(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+	salt := "randomsalt"
+	token := md5Hex("secret123" + salt)
+	url := fmt.Sprintf("/rest/ping?f=json&u=bob&t=%s&s=%s", token, salt)
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for unknown user")
+	}
+	apiErr := resp["error"].(map[string]any)
+	if apiErr["code"].(float64) != 40 {
+		t.Errorf("error code = %v, want 40", apiErr["code"])
+	}
+}
+
+func TestAuthLegacyPlaintext(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+	url := "/rest/ping?f=json&u=alice&p=secret123"
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+}
+
+func TestAuthLegacyHexEncoded(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+	hexPass := hex.EncodeToString([]byte("secret123"))
+	url := fmt.Sprintf("/rest/ping?f=json&u=alice&p=enc:%s", hexPass)
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+}
+
+func TestAuthMissingUsername(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+	url := "/rest/ping?f=json"
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for missing username")
+	}
+	apiErr := resp["error"].(map[string]any)
+	if apiErr["code"].(float64) != 10 {
+		t.Errorf("error code = %v, want 10", apiErr["code"])
+	}
+}
+
+func TestAuthMissingCredentials(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+	url := "/rest/ping?f=json&u=alice"
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for missing credentials")
+	}
+}
+
+func TestAuthDisabledFlag(t *testing.T) {
+	// testServer sets AuthDisabled: true — requests should pass without credentials.
+	srv := testServer(t)
+	resp := getJSON(t, srv, "/rest/ping?")
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok (auth disabled)", resp["status"])
+	}
+}
+
+func TestAuthExpiredCredential(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+
+	// Update credential to be expired.
+	conn, put, err := srv.db.WriteConn()
+	if err != nil {
+		t.Fatalf("WriteConn: %v", err)
+	}
+	err = sqlitex.ExecuteTransient(conn,
+		`UPDATE credential SET expires_at = '2020-01-01T00:00:00' WHERE username = 'alice'`, nil)
+	put()
+	if err != nil {
+		t.Fatalf("update credential: %v", err)
+	}
+
+	salt := "randomsalt"
+	token := md5Hex("secret123" + salt)
+	url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=%s&s=%s", token, salt)
+
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for expired credential")
+	}
+	apiErr := resp["error"].(map[string]any)
+	if apiErr["code"].(float64) != 40 {
+		t.Errorf("error code = %v, want 40", apiErr["code"])
+	}
+}
+
+func TestEncryptDecryptPasswordRoundTrip(t *testing.T) {
+	password := "test-password-123"
+	encrypted, err := auth.EncryptPassword(testEncryptionKey, password)
+	if err != nil {
+		t.Fatalf("EncryptPassword: %v", err)
+	}
+
+	decrypted, err := auth.DecryptPassword(testEncryptionKey, encrypted)
+	if err != nil {
+		t.Fatalf("DecryptPassword: %v", err)
+	}
+
+	if decrypted != password {
+		t.Errorf("round-trip failed: got %q, want %q", decrypted, password)
+	}
+}
+
+// --- Missing negative auth tests ---
+
+func TestAuthLegacyPlaintextWrongPassword(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+
+	resp := getJSON(t, srv, "/rest/ping?u=alice&p=wrongpassword")
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for wrong plaintext password")
+	}
+	apiErr, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing error in response")
+	}
+	if apiErr["code"].(float64) != 40 {
+		t.Errorf("error code = %v, want 40", apiErr["code"])
+	}
+}
+
+func TestAuthLegacyHexMalformed(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+
+	resp := getJSON(t, srv, "/rest/ping?u=alice&p=enc:ZZZZ")
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for malformed hex password")
+	}
+	apiErr, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing error in response")
+	}
+	if apiErr["code"].(float64) != 40 {
+		t.Errorf("error code = %v, want 40", apiErr["code"])
+	}
+}
+
+// --- Missing negative cover art size tests ---
+
+func TestGetCoverArtInvalidSize(t *testing.T) {
+	srv := testServer(t)
+	seedDataWithRealCover(t, srv)
+
+	// Non-numeric size should serve the original without error.
+	w := get(t, srv, "/rest/getCoverArt?id=alb1&size=abc")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for invalid size", w.Code)
+	}
+
+	// No resized files should exist.
+	matches, _ := filepath.Glob(filepath.Join(srv.cfg.CoverArtDir, "alb1_*.jpg"))
+	if len(matches) != 0 {
+		t.Errorf("unexpected resized files for invalid size: %v", matches)
+	}
+}
+
+func TestGetCoverArtSizeClamped(t *testing.T) {
+	srv := testServer(t)
+	seedDataWithRealCover(t, srv)
+
+	// Size below minimum should be clamped to minCoverArtSize (32).
+	w := get(t, srv, "/rest/getCoverArt?id=alb1&size=1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	// Should be clamped to min size, not size=1.
+	clampedPath := filepath.Join(srv.cfg.CoverArtDir, "alb1_32.jpg")
+	if _, err := os.Stat(clampedPath); err != nil {
+		t.Errorf("expected clamped resize at min size: %v", err)
+	}
+	unclamped := filepath.Join(srv.cfg.CoverArtDir, "alb1_1.jpg")
+	if _, err := os.Stat(unclamped); err == nil {
+		t.Errorf("size=1 should have been clamped, but alb1_1.jpg exists")
 	}
 }

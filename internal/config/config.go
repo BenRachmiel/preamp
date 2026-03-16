@@ -7,12 +7,15 @@ import (
 )
 
 type Config struct {
-	ListenAddr   string
-	MusicDir     string
-	DataDir      string // DB + cover art cache
-	CoverArtDir  string // derived: DataDir/covers
-	DBPath       string // derived: DataDir/preamp.db
+	ListenAddr    string
+	MusicDir      string
+	DataDir       string // DB + cover art cache
+	CoverArtDir   string // derived: DataDir/covers
+	DBPath        string // derived: DataDir/preamp.db
 	EncryptionKey string
+	AuthDisabled  bool   // PREAMP_NO_AUTH=1: explicitly disable auth (dev only)
+	DevUsername   string // PREAMP_DEV_USERNAME: seed a credential on startup
+	DevPassword   string // PREAMP_DEV_PASSWORD: plaintext password for dev credential
 }
 
 func Load() (*Config, error) {
@@ -46,6 +49,9 @@ func Load() (*Config, error) {
 	}
 
 	c.EncryptionKey = envOr("PREAMP_ENCRYPTION_KEY", "")
+	c.AuthDisabled = envOr("PREAMP_NO_AUTH", "") == "1"
+	c.DevUsername = envOr("PREAMP_DEV_USERNAME", "")
+	c.DevPassword = envOr("PREAMP_DEV_PASSWORD", "")
 
 	return c, nil
 }

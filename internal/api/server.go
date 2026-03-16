@@ -29,7 +29,7 @@ func NewServer(cfg *config.Config, database *db.DB, log *slog.Logger) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return s.authMiddleware(s.mux)
 }
 
 func (s *Server) routes() {
