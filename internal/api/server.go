@@ -3,6 +3,8 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/BenRachmiel/preamp/internal/config"
 	"github.com/BenRachmiel/preamp/internal/db"
@@ -29,7 +31,44 @@ func NewServer(cfg *config.Config, database *db.DB, log *slog.Logger) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.authMiddleware(s.mux)
+	return s.loggingMiddleware(s.authMiddleware(s.mux))
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func redactQuery(q url.Values) string {
+	redacted := make(url.Values, len(q))
+	for k, v := range q {
+		if k == "p" {
+			redacted[k] = []string{"***"}
+		} else {
+			redacted[k] = v
+		}
+	}
+	return redacted.Encode()
+}
+
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		s.log.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"query", redactQuery(r.URL.Query()),
+			"status", rec.status,
+			"duration", time.Since(start),
+		)
+	})
 }
 
 func (s *Server) routes() {

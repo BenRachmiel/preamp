@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -86,6 +87,13 @@ func (s *Scanner) Run() error {
 			return nil
 		}
 
+		// Parse accurate duration and bitrate.
+		dur, br := parseDuration(path, ext, s.log)
+		if dur > 0 {
+			info.duration = dur
+			info.bitrate = br
+		}
+
 		tracks = append(tracks, info)
 		return nil
 	})
@@ -113,6 +121,11 @@ func (s *Scanner) Run() error {
 			return fmt.Errorf("inserting batch: %w", err)
 		}
 		s.count.Store(int64(end))
+	}
+
+	// Pick up folder art for albums without embedded cover art.
+	if err := s.findFolderArt(conn); err != nil {
+		s.log.Warn("folder art detection", "err", err)
 	}
 
 	// Update album aggregates.
@@ -194,25 +207,8 @@ func readTrack(path, ext, contentType string) (trackInfo, error) {
 	d, _ := meta.Disc()
 	info.disc = d
 
-	// Estimate bitrate from format. Without ffprobe we can't get exact values,
-	// so use typical per-format averages for lossy codecs and skip lossless.
-	if info.size > 0 {
-		switch ext {
-		case ".mp3":
-			info.bitrate = 192
-		case ".ogg":
-			info.bitrate = 160
-		case ".opus":
-			info.bitrate = 128
-		case ".m4a", ".aac":
-			info.bitrate = 256
-		case ".wma":
-			info.bitrate = 192
-		}
-		if info.bitrate > 0 {
-			info.duration = int(info.size * 8 / (int64(info.bitrate) * 1000))
-		}
-	}
+	// Duration and bitrate are parsed separately in readTrackDuration
+	// after tag reading, since it needs the logger for ffprobe fallback.
 
 	// Extract cover art.
 	if pic := meta.Picture(); pic != nil && len(pic.Data) > 0 {
@@ -362,6 +358,89 @@ func (s *Scanner) updateAlbumStats(conn *sqlite.Conn) error {
 			song_count = (SELECT COUNT(*) FROM song WHERE song.album_id = album.id),
 			duration = (SELECT COALESCE(SUM(duration), 0) FROM song WHERE song.album_id = album.id)
 	`, nil)
+}
+
+// folderArtNames lists common cover art filenames to look for in album directories.
+var folderArtNames = []string{
+	"cover.jpg", "cover.png",
+	"folder.jpg", "folder.png",
+	"front.jpg", "front.png",
+}
+
+// findFolderArt checks album directories for common cover art files and copies
+// them to the cover cache for albums that don't already have embedded cover art.
+func (s *Scanner) findFolderArt(conn *sqlite.Conn) error {
+	// Get albums without cover art, along with a sample song path to locate the directory.
+	type albumDir struct {
+		id  string
+		dir string
+	}
+	var albums []albumDir
+
+	err := sqlitex.ExecuteTransient(conn, `
+		SELECT a.id, MIN(s.path) FROM album a
+		JOIN song s ON s.album_id = a.id
+		WHERE a.cover_art IS NULL OR a.cover_art = ''
+		GROUP BY a.id
+	`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			songPath := stmt.ColumnText(1)
+			albums = append(albums, albumDir{
+				id:  stmt.ColumnText(0),
+				dir: filepath.Dir(songPath),
+			})
+			return nil
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	found := 0
+	for _, album := range albums {
+		for _, name := range folderArtNames {
+			artPath := filepath.Join(album.dir, name)
+			if _, err := os.Stat(artPath); err != nil {
+				continue
+			}
+
+			// Copy to cover cache. Never overwrite existing files.
+			dst := filepath.Join(s.coverArtDir, album.id+".jpg")
+			if _, err := os.Stat(dst); err == nil {
+				break // already exists in cache
+			}
+
+			src, err := os.Open(artPath)
+			if err != nil {
+				s.log.Warn("opening folder art", "path", artPath, "err", err)
+				break
+			}
+			out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if err != nil {
+				src.Close()
+				break // race or already exists
+			}
+			_, copyErr := io.Copy(out, src)
+			src.Close()
+			out.Close()
+			if copyErr != nil {
+				os.Remove(dst)
+				s.log.Warn("copying folder art", "album_id", album.id, "err", copyErr)
+				break
+			}
+
+			_ = sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = ? WHERE id = ?`, &sqlitex.ExecOptions{
+				Args: []any{dst, album.id},
+			})
+			found++
+			break // found art for this album
+		}
+	}
+
+	if found > 0 {
+		s.log.Info("found folder art", "albums", found)
+	}
+	return nil
 }
 
 func (s *Scanner) rebuildFTS(conn *sqlite.Conn) error {

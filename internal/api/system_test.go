@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -37,6 +38,16 @@ func TestPingXML(t *testing.T) {
 	}
 	if resp.Status != "ok" {
 		t.Errorf("status = %q, want ok", resp.Status)
+	}
+}
+
+func TestXMLResponseHasNamespace(t *testing.T) {
+	srv := testServer(t)
+	w := get(t, srv, "/rest/ping")
+
+	body := w.Body.String()
+	if !strings.Contains(body, `xmlns="http://subsonic.org/restapi"`) {
+		t.Errorf("XML response missing xmlns attribute:\n%s", body)
 	}
 }
 
