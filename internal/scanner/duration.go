@@ -3,13 +3,19 @@ package scanner
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 )
+
+// maxSyncSearchBytes is the maximum number of bytes to scan looking for a
+// valid MPEG frame sync word before giving up.
+const maxSyncSearchBytes = 65536
 
 // parseDuration returns accurate duration (seconds) and bitrate (kbps) for an audio file.
 // It tries native parsing for MP3/FLAC first, then falls back to ffprobe.
@@ -70,7 +76,7 @@ func parseMP3Duration(path string) (durationSecs, bitrateKbps int, err error) {
 
 	// Find first valid MPEG frame sync.
 	var syncBuf [4]byte
-	for i := 0; i < 65536; i++ {
+	for i := 0; i < maxSyncSearchBytes; i++ {
 		if _, err := io.ReadFull(f, syncBuf[:1]); err != nil {
 			return 0, 0, err
 		}
@@ -112,7 +118,7 @@ func parseMP3Duration(path string) (durationSecs, bitrateKbps int, err error) {
 		sampleRate := mp3SampleRateTable[sampleRateIdx]
 		samplesPerFrame := 1152
 
-		frameSize := (samplesPerFrame/8*bitrate*1000)/sampleRate + int(padding)
+		_ = padding // padding only needed for frame-by-frame walking, not duration calc
 
 		// Check for Xing/VBRI header inside this frame.
 		// Xing header is at offset 36 from frame start for MPEG1 stereo, 21 for mono.
@@ -160,10 +166,8 @@ func parseMP3Duration(path string) (durationSecs, bitrateKbps int, err error) {
 
 		// No VBR header — CBR estimation from file size.
 		stat, _ := f.Stat()
-		fileSize := stat.Size()
-		audioBytesEst := fileSize - frameStart
+		audioBytesEst := stat.Size() - frameStart
 		dur := int(audioBytesEst * 8 / int64(bitrate) / 1000)
-		_ = frameSize
 		return dur, bitrate, nil
 	}
 
@@ -269,41 +273,14 @@ func ffprobeDuration(path string, log *slog.Logger) (durationSecs, bitrateKbps i
 		return 0, 0, err
 	}
 
-	// Parse duration string (float seconds).
-	var durFloat float64
-	for i, c := range result.Format.Duration {
-		if c == '.' || (c >= '0' && c <= '9') {
-			continue
-		}
-		result.Format.Duration = result.Format.Duration[:i]
-		break
+	// Parse duration (float seconds) and bitrate (bps → kbps).
+	durFloat, err := strconv.ParseFloat(result.Format.Duration, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parsing duration %q: %w", result.Format.Duration, err)
 	}
-	_, _ = io.Discard, durFloat // suppress unused
-	durFloat = 0
-	for i := 0; i < len(result.Format.Duration); i++ {
-		if result.Format.Duration[i] == '.' {
-			frac := result.Format.Duration[i+1:]
-			fracVal := 0.0
-			div := 10.0
-			for _, c := range frac {
-				fracVal += float64(c-'0') / div
-				div *= 10
-			}
-			durFloat += fracVal
-			break
-		}
-		durFloat = durFloat*10 + float64(result.Format.Duration[i]-'0')
-	}
-
 	dur := int(math.Round(durFloat))
 
-	// Parse bitrate.
-	br := 0
-	for _, c := range result.Format.BitRate {
-		if c >= '0' && c <= '9' {
-			br = br*10 + int(c-'0')
-		}
-	}
+	br, _ := strconv.Atoi(result.Format.BitRate)
 	br /= 1000
 
 	return dur, br, nil

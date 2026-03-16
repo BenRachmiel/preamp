@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/BenRachmiel/preamp/internal/art"
 	"github.com/BenRachmiel/preamp/internal/db"
@@ -21,8 +22,8 @@ func main() {
 		dataDir = "./data"
 	}
 
-	dbPath := dataDir + "/preamp.db"
-	coverArtDir := dataDir + "/covers"
+	dbPath := filepath.Join(dataDir, "preamp.db")
+	coverArtDir := filepath.Join(dataDir, "covers")
 
 	database, err := db.Open(dbPath)
 	if err != nil {

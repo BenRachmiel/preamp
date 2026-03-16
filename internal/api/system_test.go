@@ -100,6 +100,65 @@ func TestGetOpenSubsonicExtensions(t *testing.T) {
 	}
 }
 
+func TestGetUserReturnsAllRoles(t *testing.T) {
+	srv := testServer(t)
+	resp := getJSON(t, srv, "/rest/getUser?username=testuser")
+
+	user, ok := resp["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing user in response")
+	}
+	if user["username"] != "testuser" {
+		t.Errorf("username = %v, want testuser", user["username"])
+	}
+	// Verify key roles that clients check.
+	for _, role := range []string{"streamRole", "downloadRole", "scrobblingEnabled", "playlistRole", "shareRole"} {
+		if user[role] != true {
+			t.Errorf("%s = %v, want true", role, user[role])
+		}
+	}
+	// folder should be [1], not null.
+	folders, ok := user["folder"].([]any)
+	if !ok || len(folders) == 0 {
+		t.Errorf("folder should be non-empty array, got %v", user["folder"])
+	}
+}
+
+func TestGetUserMissingUsername(t *testing.T) {
+	srv := testServer(t)
+	resp := getJSON(t, srv, "/rest/getUser?")
+
+	if resp["status"] != "failed" {
+		t.Errorf("status = %v, want failed", resp["status"])
+	}
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing error in response")
+	}
+	if int(errObj["code"].(float64)) != 10 {
+		t.Errorf("error code = %v, want 10", errObj["code"])
+	}
+}
+
+func TestGetUserXML(t *testing.T) {
+	srv := testServer(t)
+	w := get(t, srv, "/rest/getUser?username=ben")
+
+	var resp SubsonicResponse
+	if err := xml.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.User == nil {
+		t.Fatal("user is nil")
+	}
+	if resp.User.Username != "ben" {
+		t.Errorf("username = %q, want ben", resp.User.Username)
+	}
+	if !resp.User.StreamRole {
+		t.Error("streamRole should be true")
+	}
+}
+
 func TestPingPOST(t *testing.T) {
 	srv := testServer(t)
 	req := httptest.NewRequest("POST", "/rest/ping?f=json", nil)

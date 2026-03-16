@@ -87,6 +87,7 @@ func (s *Server) routes() {
 	sub("ping", s.handlePing)
 	sub("getLicense", s.handleGetLicense)
 	sub("getOpenSubsonicExtensions", s.handleGetOpenSubsonicExtensions)
+	sub("getUser", s.handleGetUser)
 
 	// Browsing
 	sub("getMusicFolders", s.handleGetMusicFolders)

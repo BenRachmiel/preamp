@@ -18,6 +18,32 @@ func (s *Server) handleGetOpenSubsonicExtensions(w http.ResponseWriter, r *http.
 	writeResponse(w, r, resp)
 }
 
+func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
+	username := r.FormValue("username")
+	if username == "" {
+		writeError(w, r, 10, "missing required param: username")
+		return
+	}
+	resp := ok()
+	resp.User = &User{
+		Username:          username,
+		ScrobblingEnabled: true,
+		AdminRole:         true,
+		SettingsRole:      true,
+		DownloadRole:      true,
+		UploadRole:        false,
+		PlaylistRole:      true,
+		CoverArtRole:      true,
+		CommentRole:       false,
+		PodcastRole:       false,
+		StreamRole:        true,
+		JukeboxRole:       false,
+		ShareRole:         true,
+		Folder:            []int{1},
+	}
+	writeResponse(w, r, resp)
+}
+
 func (s *Server) handleGetMusicFolders(w http.ResponseWriter, r *http.Request) {
 	resp := ok()
 	resp.MusicFolders = &MusicFolders{

@@ -25,6 +25,14 @@ const (
 	userAgent       = "Preamp/0.1 (github.com/BenRachmiel/preamp)"
 	artworkSize     = "600x600bb"
 	minMatchScore   = 0.5
+	minArtistScore  = 0.4
+	artistWeight    = 0.6
+	albumWeight     = 0.4
+
+	sourceItunes = "itunes"
+	sourceDeezer = "deezer"
+
+	maxImageBytes = 10 << 20 // 10 MB
 )
 
 type Album struct {
@@ -142,35 +150,16 @@ func (s *Scraper) fetchArt(album Album) error {
 	if s.saveToFolder {
 		albumDir := filepath.Dir(album.SongPath)
 		folderArtPath := filepath.Join(albumDir, "cover.jpg")
-		if _, err := os.Stat(folderArtPath); err == nil {
-			s.log.Info("folder art already exists, skipping", "path", folderArtPath)
-		} else {
-			f, err := os.OpenFile(folderArtPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-			if err == nil {
-				_, writeErr := f.Write(imgData)
-				f.Close()
-				if writeErr != nil {
-					os.Remove(folderArtPath)
-					return fmt.Errorf("writing folder art: %w", writeErr)
-				}
-				s.log.Info("saved folder art", "path", folderArtPath)
-			}
+		if err := writeFileExclusive(folderArtPath, imgData); err == nil {
+			s.log.Info("saved folder art", "path", folderArtPath)
+		} else if !os.IsExist(err) {
+			return fmt.Errorf("writing folder art: %w", err)
 		}
 	}
 
 	cachePath := filepath.Join(s.coverArtDir, album.ID+".jpg")
-	if _, err := os.Stat(cachePath); err == nil {
-		s.log.Info("cache art already exists, skipping", "path", cachePath)
-	} else {
-		f, err := os.OpenFile(cachePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err == nil {
-			_, writeErr := f.Write(imgData)
-			f.Close()
-			if writeErr != nil {
-				os.Remove(cachePath)
-				return fmt.Errorf("writing cache art: %w", writeErr)
-			}
-		}
+	if err := writeFileExclusive(cachePath, imgData); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("writing cache art: %w", err)
 	}
 
 	conn, put, err := s.database.WriteConn()
@@ -191,7 +180,7 @@ func (s *Scraper) findArtwork(artist, album string) (string, string, error) {
 		s.log.Debug("iTunes failed, trying Deezer", "err", err)
 	}
 	if artURL != "" {
-		return artURL, "itunes", nil
+		return artURL, sourceItunes, nil
 	}
 
 	artURL, err = s.searchDeezer(artist, album)
@@ -199,7 +188,7 @@ func (s *Scraper) findArtwork(artist, album string) (string, string, error) {
 		return "", "", fmt.Errorf("all sources failed (last: Deezer: %w)", err)
 	}
 	if artURL != "" {
-		return artURL, "deezer", nil
+		return artURL, sourceDeezer, nil
 	}
 
 	return "", "", nil
@@ -339,11 +328,27 @@ func (s *Scraper) downloadImage(artURL string) ([]byte, error) {
 		return nil, fmt.Errorf("artwork download returned %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes))
 	if err != nil {
 		return nil, err
 	}
 	return data, nil
+}
+
+// writeFileExclusive creates a file and writes data to it. Returns os.ErrExist
+// if the file already exists (atomic via O_EXCL, no TOCTOU).
+func writeFileExclusive(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write(data)
+	f.Close()
+	if writeErr != nil {
+		os.Remove(path)
+		return writeErr
+	}
+	return nil
 }
 
 // matchScore returns 0.0–1.0 indicating how well a result matches the query.
@@ -352,10 +357,10 @@ func matchScore(wantArtist, wantAlbum, gotArtist, gotAlbum string) float64 {
 	artistScore := stringSimilarity(wantArtist, gotArtist)
 	albumScore := stringSimilarity(wantAlbum, gotAlbum)
 	// Artist must match well — wrong artist is always wrong.
-	if artistScore < 0.4 {
+	if artistScore < minArtistScore {
 		return 0
 	}
-	return artistScore*0.6 + albumScore*0.4
+	return artistScore*artistWeight + albumScore*albumWeight
 }
 
 // stringSimilarity compares two strings after normalization.

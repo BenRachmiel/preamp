@@ -207,7 +207,7 @@ func readTrack(path, ext, contentType string) (trackInfo, error) {
 	d, _ := meta.Disc()
 	info.disc = d
 
-	// Duration and bitrate are parsed separately in readTrackDuration
+	// Duration and bitrate are parsed separately via parseDuration()
 	// after tag reading, since it needs the logger for ffprobe fallback.
 
 	// Extract cover art.
@@ -404,21 +404,19 @@ func (s *Scanner) findFolderArt(conn *sqlite.Conn) error {
 				continue
 			}
 
-			// Copy to cover cache. Never overwrite existing files.
+			// Copy to cover cache. O_EXCL ensures we never overwrite.
 			dst := filepath.Join(s.coverArtDir, album.id+".jpg")
-			if _, err := os.Stat(dst); err == nil {
-				break // already exists in cache
+			out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if err != nil {
+				break // already exists or permission error
 			}
 
 			src, err := os.Open(artPath)
 			if err != nil {
+				out.Close()
+				os.Remove(dst)
 				s.log.Warn("opening folder art", "path", artPath, "err", err)
 				break
-			}
-			out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-			if err != nil {
-				src.Close()
-				break // race or already exists
 			}
 			_, copyErr := io.Copy(out, src)
 			src.Close()
@@ -429,9 +427,11 @@ func (s *Scanner) findFolderArt(conn *sqlite.Conn) error {
 				break
 			}
 
-			_ = sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = ? WHERE id = ?`, &sqlitex.ExecOptions{
+			if err := sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = ? WHERE id = ?`, &sqlitex.ExecOptions{
 				Args: []any{dst, album.id},
-			})
+			}); err != nil {
+				s.log.Warn("updating album cover_art", "album_id", album.id, "err", err)
+			}
 			found++
 			break // found art for this album
 		}

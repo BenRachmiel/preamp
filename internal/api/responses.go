@@ -40,6 +40,7 @@ type SubsonicResponse struct {
 	AlbumInfo          *AlbumInfo             `xml:"albumInfo,omitempty" json:"albumInfo,omitempty"`
 	TopSongs           *TopSongs              `xml:"topSongs,omitempty" json:"topSongs,omitempty"`
 	SimilarSongs2      *SimilarSongs2         `xml:"similarSongs2,omitempty" json:"similarSongs2,omitempty"`
+	User               *User                  `xml:"user,omitempty" json:"user,omitempty"`
 }
 
 type APIError struct {
@@ -228,6 +229,25 @@ type TopSongs struct {
 
 type SimilarSongs2 struct {
 	Songs []SongID3 `xml:"song" json:"song"`
+}
+
+// --- User types ---
+
+type User struct {
+	Username           string `xml:"username,attr" json:"username"`
+	ScrobblingEnabled  bool   `xml:"scrobblingEnabled,attr" json:"scrobblingEnabled"`
+	AdminRole          bool   `xml:"adminRole,attr" json:"adminRole"`
+	SettingsRole       bool   `xml:"settingsRole,attr" json:"settingsRole"`
+	DownloadRole       bool   `xml:"downloadRole,attr" json:"downloadRole"`
+	UploadRole         bool   `xml:"uploadRole,attr" json:"uploadRole"`
+	PlaylistRole       bool   `xml:"playlistRole,attr" json:"playlistRole"`
+	CoverArtRole       bool   `xml:"coverArtRole,attr" json:"coverArtRole"`
+	CommentRole        bool   `xml:"commentRole,attr" json:"commentRole"`
+	PodcastRole        bool   `xml:"podcastRole,attr" json:"podcastRole"`
+	StreamRole         bool   `xml:"streamRole,attr" json:"streamRole"`
+	JukeboxRole        bool   `xml:"jukeboxRole,attr" json:"jukeboxRole"`
+	ShareRole          bool   `xml:"shareRole,attr" json:"shareRole"`
+	Folder             []int  `xml:"folder" json:"folder"`
 }
 
 // --- Response helpers ---
