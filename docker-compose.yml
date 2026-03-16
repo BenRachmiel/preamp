@@ -10,11 +10,24 @@ services:
       PREAMP_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       PREAMP_DEV_USERNAME: ben
       PREAMP_DEV_PASSWORD: preamp
+      PREAMP_ADMIN_SECRET_FILE: /run/secrets/admin-secret
+      # PREAMP_CREDENTIAL_TTL: "168h"  # default 7 days
       # PREAMP_NO_AUTH: "1"  # dev only
+      # --- OIDC (alternative to ADMIN_SECRET_FILE, mutually exclusive) ---
+      # PREAMP_OIDC_ISSUER: "https://auth.example.com/realms/main"
+      # PREAMP_OIDC_CLIENT_ID: "preamp"
+      # PREAMP_OIDC_CLIENT_SECRET: ""
+      # PREAMP_OIDC_REDIRECT_URI: "http://localhost:4533/manage/callback"
     volumes:
       - /home/bbr/okd-pvc-backups/navidrome/music:/music:ro
       - preamp-data:/data
+    secrets:
+      - admin-secret
     restart: unless-stopped
+
+secrets:
+  admin-secret:
+    file: ./admin-secret
 
 volumes:
   preamp-data:

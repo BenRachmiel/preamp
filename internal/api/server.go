@@ -12,26 +12,45 @@ import (
 )
 
 type Server struct {
-	cfg     *config.Config
-	db      *db.DB
-	log     *slog.Logger
-	mux     *http.ServeMux
-	scanner *scanner.Scanner
+	cfg          *config.Config
+	db           *db.DB
+	log          *slog.Logger
+	mux          *http.ServeMux // top-level mux dispatching /rest/ and /manage/
+	subsonicMux  *http.ServeMux // Subsonic API routes
+	scanner      *scanner.Scanner
+	manageHandler http.Handler
 }
 
 func NewServer(cfg *config.Config, database *db.DB, log *slog.Logger) *Server {
 	s := &Server{
-		cfg: cfg,
-		db:  database,
-		log: log,
-		mux: http.NewServeMux(),
+		cfg:         cfg,
+		db:          database,
+		log:         log,
+		mux:         http.NewServeMux(),
+		subsonicMux: http.NewServeMux(),
 	}
-	s.routes()
+	s.subsonicRoutes()
+	s.wireTopMux()
 	return s
 }
 
+// SetManageHandler sets the management UI handler for /manage/ routes.
+func (s *Server) SetManageHandler(h http.Handler) {
+	s.manageHandler = h
+	s.wireTopMux()
+}
+
+func (s *Server) wireTopMux() {
+	s.mux = http.NewServeMux()
+	s.mux.Handle("/rest/", s.authMiddleware(s.subsonicMux))
+	if s.manageHandler != nil {
+		s.mux.Handle("/manage/", s.manageHandler)
+		s.mux.Handle("/manage", s.manageHandler)
+	}
+}
+
 func (s *Server) Handler() http.Handler {
-	return s.loggingMiddleware(s.authMiddleware(s.mux))
+	return s.loggingMiddleware(s.mux)
 }
 
 type statusRecorder struct {
@@ -47,7 +66,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 func redactQuery(q url.Values) string {
 	redacted := make(url.Values, len(q))
 	for k, v := range q {
-		if k == "p" {
+		if k == "p" || k == "apiKey" {
 			redacted[k] = []string{"***"}
 		} else {
 			redacted[k] = v
@@ -71,16 +90,12 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) routes() {
-	// All Subsonic endpoints live under /rest/
-	// Using Go 1.22+ method routing.
+func (s *Server) subsonicRoutes() {
 	sub := func(pattern string, handler func(http.ResponseWriter, *http.Request)) {
-		// Subsonic clients use both GET and POST.
-		s.mux.HandleFunc("GET /rest/"+pattern, handler)
-		s.mux.HandleFunc("POST /rest/"+pattern, handler)
-		// Also handle with .view suffix (legacy).
-		s.mux.HandleFunc("GET /rest/"+pattern+".view", handler)
-		s.mux.HandleFunc("POST /rest/"+pattern+".view", handler)
+		s.subsonicMux.HandleFunc("GET /rest/"+pattern, handler)
+		s.subsonicMux.HandleFunc("POST /rest/"+pattern, handler)
+		s.subsonicMux.HandleFunc("GET /rest/"+pattern+".view", handler)
+		s.subsonicMux.HandleFunc("POST /rest/"+pattern+".view", handler)
 	}
 
 	// System
@@ -125,8 +140,11 @@ func (s *Server) routes() {
 	sub("deletePlaylist", s.handleDeletePlaylist)
 
 	// Info
+	sub("getArtistInfo", s.handleGetArtistInfo2)
 	sub("getArtistInfo2", s.handleGetArtistInfo2)
+	sub("getAlbumInfo", s.handleGetAlbumInfo2)
 	sub("getAlbumInfo2", s.handleGetAlbumInfo2)
+	sub("getSimilarSongs", s.handleGetSimilarSongs2)
 	sub("getSimilarSongs2", s.handleGetSimilarSongs2)
 	sub("getTopSongs", s.handleGetTopSongs)
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -9,13 +10,15 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+	"zombiezen.com/go/sqlite/sqlitex"
+
 	"github.com/BenRachmiel/preamp/internal/api"
 	"github.com/BenRachmiel/preamp/internal/auth"
 	"github.com/BenRachmiel/preamp/internal/config"
 	"github.com/BenRachmiel/preamp/internal/db"
+	"github.com/BenRachmiel/preamp/internal/manage"
 	"github.com/BenRachmiel/preamp/internal/scanner"
-
-	"zombiezen.com/go/sqlite/sqlitex"
 )
 
 func main() {
@@ -54,6 +57,35 @@ func main() {
 
 	sc := scanner.New(database, cfg.MusicDir, cfg.CoverArtDir, log)
 	srv.SetScanner(sc)
+
+	// Management UI.
+	if cfg.ManageEnabled {
+		var authenticator manage.Authenticator
+		if cfg.AdminSecretFile != "" {
+			authenticator, err = manage.NewSecretAuthenticator(cfg.AdminSecretFile)
+			if err != nil {
+				log.Error("initializing admin secret auth", "err", err)
+				os.Exit(1)
+			}
+			log.Info("management UI enabled", "mode", "file-secret")
+		}
+		if cfg.OIDCIssuer != "" {
+			ctx := context.Background()
+			authenticator, err = manage.NewOIDCAuthenticator(ctx,
+				cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.OIDCRedirectURI)
+			if err != nil {
+				log.Error("OIDC discovery failed — management UI disabled", "err", err)
+			} else {
+				log.Info("management UI enabled", "mode", "oidc", "issuer", cfg.OIDCIssuer)
+			}
+		}
+
+		if authenticator != nil {
+			mgr := manage.NewServer(database, cfg, authenticator, log)
+			defer mgr.Close()
+			srv.SetManageHandler(mgr.Handler())
+		}
+	}
 
 	// Run initial scan in background.
 	go func() {
@@ -96,15 +128,23 @@ func seedDevCredential(database *db.DB, cfg *config.Config) error {
 		return err
 	}
 
+	hashed, err := bcrypt.GenerateFromPassword([]byte(cfg.DevPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hashing dev password: %w", err)
+	}
+
 	conn, put, err := database.WriteConn()
 	if err != nil {
 		return err
 	}
 	defer put()
 
+	id := "dev-" + cfg.DevUsername
 	return sqlitex.ExecuteTransient(conn,
-		`INSERT INTO credential (id, username, encrypted_password, client_name)
-		 VALUES (?, ?, ?, 'dev')
-		 ON CONFLICT(username) DO UPDATE SET encrypted_password = excluded.encrypted_password`,
-		&sqlitex.ExecOptions{Args: []any{db.NewID(), cfg.DevUsername, encrypted}})
+		`INSERT INTO credential (id, username, hashed_api_key, encrypted_password, client_name, legacy_auth)
+		 VALUES (?, ?, ?, ?, 'dev', 1)
+		 ON CONFLICT(id) DO UPDATE SET
+		   hashed_api_key = excluded.hashed_api_key,
+		   encrypted_password = excluded.encrypted_password`,
+		&sqlitex.ExecOptions{Args: []any{id, cfg.DevUsername, hashed, encrypted}})
 }

@@ -14,7 +14,9 @@ func (s *Server) handleGetLicense(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetOpenSubsonicExtensions(w http.ResponseWriter, r *http.Request) {
 	resp := ok()
-	resp.OpenSubsonicExt = []OpenSubsonicExt{}
+	resp.OpenSubsonicExt = []OpenSubsonicExt{
+		{Name: "apiKeyAuthentication", Versions: []int{1}},
+	}
 	writeResponse(w, r, resp)
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type Config struct {
@@ -16,6 +17,15 @@ type Config struct {
 	AuthDisabled  bool   // PREAMP_NO_AUTH=1: explicitly disable auth (dev only)
 	DevUsername   string // PREAMP_DEV_USERNAME: seed a credential on startup
 	DevPassword   string // PREAMP_DEV_PASSWORD: plaintext password for dev credential
+
+	// Management UI auth — exactly one of OIDCIssuer or AdminSecretFile may be set.
+	OIDCIssuer       string        // PREAMP_OIDC_ISSUER
+	OIDCClientID     string        // PREAMP_OIDC_CLIENT_ID
+	OIDCClientSecret string        // PREAMP_OIDC_CLIENT_SECRET
+	OIDCRedirectURI  string        // PREAMP_OIDC_REDIRECT_URI
+	AdminSecretFile  string        // PREAMP_ADMIN_SECRET_FILE (username:password)
+	CredentialTTL    time.Duration // PREAMP_CREDENTIAL_TTL (default 168h = 7 days)
+	ManageEnabled    bool          // derived: true if either OIDC or secret file configured
 }
 
 func Load() (*Config, error) {
@@ -52,6 +62,25 @@ func Load() (*Config, error) {
 	c.AuthDisabled = envOr("PREAMP_NO_AUTH", "") == "1"
 	c.DevUsername = envOr("PREAMP_DEV_USERNAME", "")
 	c.DevPassword = envOr("PREAMP_DEV_PASSWORD", "")
+
+	// Management UI config.
+	c.OIDCIssuer = envOr("PREAMP_OIDC_ISSUER", "")
+	c.OIDCClientID = envOr("PREAMP_OIDC_CLIENT_ID", "")
+	c.OIDCClientSecret = envOr("PREAMP_OIDC_CLIENT_SECRET", "")
+	c.OIDCRedirectURI = envOr("PREAMP_OIDC_REDIRECT_URI", "")
+	c.AdminSecretFile = envOr("PREAMP_ADMIN_SECRET_FILE", "")
+
+	if c.OIDCIssuer != "" && c.AdminSecretFile != "" {
+		return nil, fmt.Errorf("PREAMP_OIDC_ISSUER and PREAMP_ADMIN_SECRET_FILE are mutually exclusive")
+	}
+
+	c.ManageEnabled = c.OIDCIssuer != "" || c.AdminSecretFile != ""
+
+	ttlStr := envOr("PREAMP_CREDENTIAL_TTL", "168h")
+	c.CredentialTTL, err = time.ParseDuration(ttlStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid PREAMP_CREDENTIAL_TTL %q: %w", ttlStr, err)
+	}
 
 	return c, nil
 }

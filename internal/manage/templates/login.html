@@ -1,0 +1,11 @@
+{{define "content"}}
+<h1>preamp — login</h1>
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="POST" action="/manage/login">
+  <label for="username">Username</label>
+  <input type="text" id="username" name="username" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="current-password" required>
+  <button type="submit">Login</button>
+</form>
+{{end}}

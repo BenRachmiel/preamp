@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"golang.org/x/crypto/bcrypt"
 	"zombiezen.com/go/sqlite/sqlitex"
 
 	"github.com/BenRachmiel/preamp/internal/auth"
@@ -217,27 +218,46 @@ func seedDataWithRealCover(t *testing.T, srv *Server) {
 
 const testEncryptionKey = "0123456789abcdef0123456789abcdef" // 32 hex chars = 16 bytes
 
-// testServerWithAuth sets up a server with auth enabled and a seeded credential.
+// testServerWithAuth sets up a server with auth enabled and a seeded legacy credential.
 func testServerWithAuth(t *testing.T, username, password string) *Server {
 	t.Helper()
 	srv := testServer(t, testServerOpts{encryptionKey: testEncryptionKey})
+	seedCredential(t, srv, username, password, true)
+	return srv
+}
 
-	encrypted, err := auth.EncryptPassword(testEncryptionKey, password)
+// seedCredential inserts a credential into the DB. If legacy is true, the credential
+// supports token/password auth (encrypted_password populated, legacy_auth=1).
+func seedCredential(t *testing.T, srv *Server, username, password string, legacy bool) string {
+	t.Helper()
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
 	if err != nil {
-		t.Fatalf("EncryptPassword: %v", err)
+		t.Fatalf("bcrypt: %v", err)
 	}
 
+	var encrypted []byte
+	legacyFlag := 0
+	if legacy {
+		encrypted, err = auth.EncryptPassword(testEncryptionKey, password)
+		if err != nil {
+			t.Fatalf("EncryptPassword: %v", err)
+		}
+		legacyFlag = 1
+	}
+
+	id := db.NewID()
 	conn, put, err := srv.db.WriteConn()
 	if err != nil {
 		t.Fatalf("WriteConn: %v", err)
 	}
 	err = sqlitex.ExecuteTransient(conn,
-		`INSERT INTO credential (id, username, encrypted_password, client_name) VALUES (?, ?, ?, 'test')`,
-		&sqlitex.ExecOptions{Args: []any{db.NewID(), username, encrypted}})
+		`INSERT INTO credential (id, username, hashed_api_key, encrypted_password, client_name, legacy_auth)
+		 VALUES (?, ?, ?, ?, 'test', ?)`,
+		&sqlitex.ExecOptions{Args: []any{id, username, hashed, encrypted, legacyFlag}})
 	put()
 	if err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
-
-	return srv
+	return id
 }

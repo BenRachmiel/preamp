@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/BenRachmiel/preamp/internal/auth"
+	"golang.org/x/crypto/bcrypt"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
+
+	"github.com/BenRachmiel/preamp/internal/auth"
 )
 
 type contextKey string
@@ -38,10 +39,17 @@ func requireUsername(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return u, true
 }
 
+// credential holds a row from the credential table.
+type credential struct {
+	id                string
+	username          string
+	hashedAPIKey      []byte
+	encryptedPassword []byte
+	legacyAuth        bool
+}
+
 // authMiddleware wraps the server mux and enforces Subsonic credential auth.
-// Auth is on by default. Set PREAMP_NO_AUTH=1 to explicitly disable (dev only).
-// Anonymous endpoints (ping, getLicense, etc.) work without u=.
-// Per-user endpoints must call usernameFromRequest and validate non-empty.
+// Auth priority: apiKey → t+s (token) → p (legacy). First present wins.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	if s.cfg.AuthDisabled {
 		s.log.Warn("auth disabled — all requests accepted without credential check")
@@ -55,15 +63,21 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		username := r.FormValue("u")
-		if username == "" {
-			writeError(w, r, 10, "missing parameter: u")
+		// apiKey auth: no u= required, checked against all non-expired credentials.
+		if apiKey := r.FormValue("apiKey"); apiKey != "" {
+			username, err := s.authenticateAPIKey(apiKey)
+			if err != nil {
+				writeError(w, r, 40, "wrong username or password")
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), usernameKey, username))
+			next.ServeHTTP(w, r)
 			return
 		}
 
-		password, err := s.lookupPassword(username)
-		if err != nil {
-			writeError(w, r, 40, "wrong username or password")
+		username := r.FormValue("u")
+		if username == "" {
+			writeError(w, r, 10, "missing parameter: u")
 			return
 		}
 
@@ -72,8 +86,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Token auth: t=md5(password+salt), s=salt
 		if token := r.FormValue("t"); token != "" {
 			salt := r.FormValue("s")
-			expected := md5Hex(password + salt)
-			if !strings.EqualFold(token, expected) {
+			if err := s.authenticateToken(username, token, salt); err != nil {
 				writeError(w, r, 40, "wrong username or password")
 				return
 			}
@@ -92,7 +105,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				}
 				plain = string(decoded)
 			}
-			if plain != password {
+			if err := s.authenticateLegacy(username, plain); err != nil {
 				writeError(w, r, 40, "wrong username or password")
 				return
 			}
@@ -104,53 +117,128 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// lookupPassword finds a credential by username, decrypts the password,
-// and checks expiry.
-func (s *Server) lookupPassword(username string) (string, error) {
-	conn, put, err := s.db.ReadConn()
+// authenticateAPIKey checks the provided key against all non-expired credentials
+// using bcrypt comparison. Returns the username from the matching credential.
+func (s *Server) authenticateAPIKey(apiKey string) (string, error) {
+	creds, err := s.loadAllCredentials()
 	if err != nil {
 		return "", err
 	}
+	for _, c := range creds {
+		if bcrypt.CompareHashAndPassword(c.hashedAPIKey, []byte(apiKey)) == nil {
+			return c.username, nil
+		}
+	}
+	return "", fmt.Errorf("no matching credential")
+}
+
+// authenticateToken checks token auth against legacy-enabled credentials for the user.
+func (s *Server) authenticateToken(username, token, salt string) error {
+	creds, err := s.loadLegacyCredentials(username)
+	if err != nil {
+		return err
+	}
+	for _, c := range creds {
+		password, err := auth.DecryptPassword(s.cfg.EncryptionKey, c.encryptedPassword)
+		if err != nil {
+			continue
+		}
+		expected := md5Hex(password + salt)
+		if strings.EqualFold(token, expected) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no matching credential")
+}
+
+// authenticateLegacy checks plaintext password against legacy-enabled credentials.
+func (s *Server) authenticateLegacy(username, plain string) error {
+	creds, err := s.loadLegacyCredentials(username)
+	if err != nil {
+		return err
+	}
+	for _, c := range creds {
+		password, err := auth.DecryptPassword(s.cfg.EncryptionKey, c.encryptedPassword)
+		if err != nil {
+			continue
+		}
+		if plain == password {
+			return nil
+		}
+	}
+	return fmt.Errorf("no matching credential")
+}
+
+// loadAllCredentials loads all non-expired credentials (for apiKey auth).
+func (s *Server) loadAllCredentials() ([]credential, error) {
+	conn, put, err := s.db.ReadConn()
+	if err != nil {
+		return nil, err
+	}
 	defer put()
 
-	var encryptedPassword []byte
-	var expiresAt string
-	found := false
-
+	var creds []credential
 	err = sqlitex.ExecuteTransient(conn,
-		`SELECT encrypted_password, expires_at FROM credential WHERE username = ?`,
+		`SELECT id, username, hashed_api_key FROM credential
+		 WHERE expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now')`,
 		&sqlitex.ExecOptions{
-			Args: []any{username},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
-				n := stmt.ColumnLen(0)
-				encryptedPassword = make([]byte, n)
-				stmt.ColumnBytes(0, encryptedPassword)
-				expiresAt = stmt.ColumnText(1)
-				found = true
+				n := stmt.ColumnLen(2)
+				hash := make([]byte, n)
+				stmt.ColumnBytes(2, hash)
+				creds = append(creds, credential{
+					id:           stmt.ColumnText(0),
+					username:     stmt.ColumnText(1),
+					hashedAPIKey: hash,
+				})
 				return nil
 			},
 		})
-	if err != nil || !found {
-		return "", fmt.Errorf("credential not found")
-	}
-
-	if expiresAt != "" {
-		exp, err := time.Parse("2006-01-02T15:04:05", expiresAt)
-		if err == nil && time.Now().After(exp) {
-			return "", fmt.Errorf("credential expired")
-		}
-	}
-
-	password, err := auth.DecryptPassword(s.cfg.EncryptionKey, encryptedPassword)
 	if err != nil {
-		return "", fmt.Errorf("decrypting password: %w", err)
+		return nil, err
 	}
+	if len(creds) == 0 {
+		return nil, fmt.Errorf("no credentials found")
+	}
+	return creds, nil
+}
 
-	return password, nil
+// loadLegacyCredentials loads non-expired, legacy-auth-enabled credentials for a user.
+func (s *Server) loadLegacyCredentials(username string) ([]credential, error) {
+	conn, put, err := s.db.ReadConn()
+	if err != nil {
+		return nil, err
+	}
+	defer put()
+
+	var creds []credential
+	err = sqlitex.ExecuteTransient(conn,
+		`SELECT id, encrypted_password FROM credential
+		 WHERE username = ? AND legacy_auth = 1 AND encrypted_password IS NOT NULL
+		   AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))`,
+		&sqlitex.ExecOptions{
+			Args: []any{username},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				n := stmt.ColumnLen(1)
+				enc := make([]byte, n)
+				stmt.ColumnBytes(1, enc)
+				creds = append(creds, credential{
+					id:                stmt.ColumnText(0),
+					encryptedPassword: enc,
+				})
+				return nil
+			},
+		})
+	if err != nil {
+		return nil, err
+	}
+	if len(creds) == 0 {
+		return nil, fmt.Errorf("no legacy credentials for user %q", username)
+	}
+	return creds, nil
 }
 
 func md5Hex(s string) string {
 	h := md5.Sum([]byte(s))
 	return hex.EncodeToString(h[:])
 }
-

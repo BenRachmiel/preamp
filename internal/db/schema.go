@@ -52,12 +52,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS song_fts USING fts5(
 
 CREATE TABLE IF NOT EXISTS credential (
 	id                 TEXT PRIMARY KEY,
-	username           TEXT NOT NULL UNIQUE,
-	encrypted_password BLOB NOT NULL,
-	client_name        TEXT,
+	username           TEXT NOT NULL,
+	hashed_api_key     BLOB NOT NULL,
+	encrypted_password BLOB,
+	client_name        TEXT NOT NULL DEFAULT '',
+	legacy_auth        INTEGER NOT NULL DEFAULT 0,
 	expires_at         TEXT,
 	created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
+CREATE INDEX IF NOT EXISTS idx_credential_username ON credential(username);
 
 CREATE TABLE IF NOT EXISTS star (
 	id        TEXT PRIMARY KEY,
