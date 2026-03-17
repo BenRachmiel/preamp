@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "preamp.fullname" . }}
+  labels:
+    {{- include "preamp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "preamp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "preamp.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: preamp
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 4533
+              protocol: TCP
+            - name: admin
+              containerPort: 4534
+              protocol: TCP
+          env:
+            - name: PREAMP_MUSIC_DIR
+              value: {{ .Values.config.musicDir | quote }}
+            - name: PREAMP_DATA_DIR
+              value: {{ .Values.config.dataDir | quote }}
+            - name: PREAMP_LISTEN
+              value: {{ .Values.config.listen | quote }}
+            - name: PREAMP_CREDENTIAL_TTL
+              value: {{ .Values.config.credentialTTL | quote }}
+            {{- if not .Values.ui.enabled }}
+            - name: PREAMP_NO_AUTH
+              value: "1"
+            - name: PREAMP_DEV_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "preamp.secretName" . }}
+                  key: PREAMP_DEV_USERNAME
+            - name: PREAMP_DEV_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "preamp.secretName" . }}
+                  key: PREAMP_DEV_PASSWORD
+            {{- end }}
+            - name: PREAMP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "preamp.secretName" . }}
+                  key: PREAMP_ENCRYPTION_KEY
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: music
+              mountPath: /music
+              readOnly: true
+            - name: data
+              mountPath: /data
+        {{- if .Values.ui.enabled }}
+        - name: ui
+          image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"
+          imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          ports:
+            - name: ui-http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: PREAMP_NO_AUTH
+              value: "true"
+        - name: oauth2-proxy
+          image: "{{ .Values.ui.oauthProxy.image.repository }}:{{ .Values.ui.oauthProxy.image.tag }}"
+          ports:
+            - name: oauth-proxy
+              containerPort: 4180
+              protocol: TCP
+          args:
+            - --upstream=http://localhost:80
+            - --http-address=0.0.0.0:4180
+            - --provider={{ .Values.ui.oauthProxy.provider }}
+            - --oidc-issuer-url={{ required "ui.oauthProxy.issuerURL is required when ui.enabled" .Values.ui.oauthProxy.issuerURL }}
+            - --client-id={{ required "ui.oauthProxy.clientID is required when ui.enabled" .Values.ui.oauthProxy.clientID }}
+            - --pass-user-headers=true
+            - --cookie-secure=true
+            - --reverse-proxy=true
+            {{- range .Values.ui.oauthProxy.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "preamp.secretName" . }}
+                  key: OAUTH2_PROXY_CLIENT_SECRET
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "preamp.secretName" . }}
+                  key: OAUTH2_PROXY_COOKIE_SECRET
+        {{- end }}
+      volumes:
+        - name: music
+          persistentVolumeClaim:
+            {{- if .Values.persistence.music.existingClaim }}
+            claimName: {{ .Values.persistence.music.existingClaim }}
+            {{- else }}
+            claimName: {{ include "preamp.fullname" . }}-music
+            {{- end }}
+        - name: data
+          persistentVolumeClaim:
+            {{- if .Values.persistence.data.existingClaim }}
+            claimName: {{ .Values.persistence.data.existingClaim }}
+            {{- else }}
+            claimName: {{ include "preamp.fullname" . }}-data
+            {{- end }}

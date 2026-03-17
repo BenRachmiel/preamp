@@ -1,0 +1,35 @@
+{{- if not .Values.persistence.music.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "preamp.fullname" . }}-music
+  labels:
+    {{- include "preamp.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.music.accessMode }}
+  {{- if .Values.persistence.music.storageClass }}
+  storageClassName: {{ .Values.persistence.music.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.music.size }}
+{{- end }}
+---
+{{- if not .Values.persistence.data.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "preamp.fullname" . }}-data
+  labels:
+    {{- include "preamp.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.persistence.data.storageClass }}
+  storageClassName: {{ .Values.persistence.data.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.data.size }}
+{{- end }}

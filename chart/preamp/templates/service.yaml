@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "preamp.fullname" . }}
+  labels:
+    {{- include "preamp.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: subsonic
+    {{- if .Values.ui.enabled }}
+    - port: 4180
+      targetPort: oauth-proxy
+      protocol: TCP
+      name: ui
+    {{- end }}
+  selector:
+    {{- include "preamp.selectorLabels" . | nindent 4 }}

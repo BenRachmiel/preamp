@@ -1,0 +1,130 @@
+image:
+  repository: ghcr.io/benrachmiel/preamp
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# -- Core config
+config:
+  musicDir: /music
+  dataDir: /data
+  listen: ":4533"
+  credentialTTL: "168h"
+
+# -- UI + oauth2-proxy sidecar (set enabled: false to disable the management UI)
+ui:
+  enabled: true
+  image:
+    repository: ghcr.io/benrachmiel/preamp/ui
+    tag: latest
+    pullPolicy: IfNotPresent
+  oauthProxy:
+    image:
+      repository: quay.io/oauth2-proxy/oauth2-proxy
+      tag: v7.9.0
+    provider: oidc
+    issuerURL: ""          # OIDC issuer, required when ui.enabled
+    clientID: ""
+    # Extra args passed to oauth2-proxy (e.g., --email-domain=*, --allowed-group=...)
+    extraArgs: []
+
+# -- Secrets management.
+# By default the chart creates a Secret from the values below.
+# Set existingSecret to use an externally-managed Secret (e.g. from ESO).
+secrets:
+  existingSecret: ""
+  # Only used when existingSecret is empty:
+  encryptionKey: ""
+  oidcClientSecret: ""     # required when ui.enabled
+  oauthCookieSecret: ""    # required when ui.enabled
+
+# -- When ui.enabled=false, these are required for hardcoded credential access:
+devCredentials:
+  username: ""   # PREAMP_DEV_USERNAME
+  password: ""   # PREAMP_DEV_PASSWORD
+
+service:
+  type: ClusterIP
+  port: 4533
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: preamp.example.com
+  tls: []
+  #  - secretName: preamp-tls
+  #    hosts:
+  #      - preamp.example.com
+
+# -- Gateway API (Cilium, etc.) — use instead of ingress
+gateway:
+  enabled: false
+  host: preamp.example.com
+  gatewayName: main-gateway
+  gatewayNamespace: kube-system
+
+persistence:
+  music:
+    # -- Use an existing PVC, or leave empty to create one.
+    existingClaim: ""
+    storageClass: ""
+    accessMode: ReadOnlyMany
+    size: 50Gi
+  data:
+    # -- Use an existing PVC, or leave empty to create one.
+    existingClaim: ""
+    storageClass: ""
+    size: 1Gi
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+probes:
+  liveness:
+    path: /rest/ping
+    initialDelaySeconds: 5
+    periodSeconds: 30
+  readiness:
+    path: /rest/ping
+    initialDelaySeconds: 2
+    periodSeconds: 10
+
+# -- Art scraper job. Run on demand with: helm upgrade --set scrapeArt.enabled=true
+scrapeArt:
+  enabled: false
+  image:
+    repository: ghcr.io/benrachmiel/preamp/scrape-art
+    tag: latest
+  args:
+    - --music-dir=/music
+    - --data-dir=/data
+
+# -- Extra arbitrary manifests to deploy alongside the chart.
+# Each entry is templated before apply. Use for ExternalSecret, SecretStore, etc.
+extraObjects: []
+#  - apiVersion: external-secrets.io/v1beta1
+#    kind: ExternalSecret
+#    metadata:
+#      name: preamp-secrets
+#    spec:
+#      refreshInterval: 1h
+#      secretStoreRef:
+#        name: vault-backend
+#        kind: ClusterSecretStore
+#      target:
+#        name: preamp-secrets
+#      data:
+#        - secretKey: PREAMP_ENCRYPTION_KEY
+#          remoteRef:
+#            key: preamp
+#            property: encryption-key
+#        - secretKey: PREAMP_OIDC_CLIENT_SECRET
+#          remoteRef:
+#            key: preamp
+#            property: oidc-client-secret

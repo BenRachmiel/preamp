@@ -1,7 +1,7 @@
 CLAUDE.md
 
 # Build output
-preamp
+/preamp
 
 # Test fixtures (275MB of MP3s — too large for git)
 test-music-lib/
