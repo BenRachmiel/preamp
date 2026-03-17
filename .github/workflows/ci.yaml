@@ -109,4 +109,5 @@ jobs:
       - name: Package and push chart
         run: |
           helm package chart/preamp
-          helm push preamp-*.tgz oci://ghcr.io/${{ github.repository_owner }}
+          REPO="${{ github.repository }}"
+          helm push preamp-*.tgz "oci://ghcr.io/${REPO,,}"
