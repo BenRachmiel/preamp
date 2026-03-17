@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/benrachmiel/preamp
+  repository: ghcr.io/benrachmiel/preamp/images/preamp-core
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -16,7 +16,7 @@ config:
 ui:
   enabled: true
   image:
-    repository: ghcr.io/benrachmiel/preamp/ui
+    repository: ghcr.io/benrachmiel/preamp/images/preamp-ui
     tag: latest
     pullPolicy: IfNotPresent
   oauthProxy:
@@ -94,16 +94,6 @@ probes:
     path: /rest/ping
     initialDelaySeconds: 2
     periodSeconds: 10
-
-# -- Art scraper job. Run on demand with: helm upgrade --set scrapeArt.enabled=true
-scrapeArt:
-  enabled: false
-  image:
-    repository: ghcr.io/benrachmiel/preamp/scrape-art
-    tag: latest
-  args:
-    - --music-dir=/music
-    - --data-dir=/data
 
 # -- Extra arbitrary manifests to deploy alongside the chart.
 # Each entry is templated before apply. Use for ExternalSecret, SecretStore, etc.

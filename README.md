@@ -122,10 +122,6 @@ Go templates + HTMX. Mint, renew, and revoke Subsonic credentials from a browser
 - FTS5 full-text index with `unicode61` tokenizer and diacritics removal
 - Background scan on startup, API available immediately
 
-### Album Art Scraping
-
-Standalone `cmd/scrape-art` tool searches iTunes and Deezer for albums missing cover art. Fuzzy match scoring, never overwrites existing files. Not part of the server runtime.
-
 ## Client Compatibility
 
 Tested with (pickiest first):
