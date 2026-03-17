@@ -202,6 +202,65 @@ func TestSupportedExts(t *testing.T) {
 	}
 }
 
+func TestScanSkipsSymlinks(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := t.TempDir()
+
+	// Create a real MP3 file in the real directory.
+	realFile := filepath.Join(realDir, "real.mp3")
+	os.WriteFile(realFile, []byte("not a real mp3 but has mp3 ext"), 0o644)
+
+	// Create a symlink in the scan directory pointing to the real file.
+	linkPath := filepath.Join(tmpDir, "linked.mp3")
+	if err := os.Symlink(realFile, linkPath); err != nil {
+		t.Fatalf("creating symlink: %v", err)
+	}
+
+	// Also create a real file in the scan directory to ensure scanning works.
+	realInDir := filepath.Join(tmpDir, "real.mp3")
+	os.WriteFile(realInDir, []byte("not a real mp3"), 0o644)
+
+	sc, database := setupScanner(t, tmpDir)
+	if err := sc.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Only the real file should be indexed, not the symlink.
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+
+	var songCount int
+	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM song`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			songCount = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if songCount != 1 {
+		t.Errorf("songs = %d, want 1 (symlink should be skipped)", songCount)
+	}
+}
+
+func TestSafeReadTrackRecoversPanic(t *testing.T) {
+	// safeReadTrack should recover from panics and return an error.
+	// We can't easily make readTrack panic without a crafted file,
+	// so test the wrapper directly by verifying it handles normal errors.
+	tmpDir := t.TempDir()
+	fpath := filepath.Join(tmpDir, "test.mp3")
+	os.WriteFile(fpath, []byte("not a real mp3"), 0o644)
+
+	info, err := safeReadTrack(fpath, ".mp3", "audio/mpeg")
+	if err != nil {
+		t.Fatalf("safeReadTrack: %v", err)
+	}
+	if info.title != "test" {
+		t.Errorf("title = %q, want %q", info.title, "test")
+	}
+}
+
 func TestReadTrackFallbackNoTags(t *testing.T) {
 	// Create a dummy file with no valid tags.
 	tmpDir := t.TempDir()

@@ -22,8 +22,21 @@ jobs:
 
       - run: go test ./... -count=1
 
+  test-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - run: cd ui && npm ci && npm run build
+
   build:
-    needs: test
+    needs: [test, test-ui]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -36,9 +49,25 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/metadata-action@v5
-        id: meta
+        id: meta-server
         with:
           images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+
+      - uses: docker/metadata-action@v5
+        id: meta-scraper
+        with:
+          images: ghcr.io/${{ github.repository }}/scrape-art
+          tags: |
+            type=sha
+            type=raw,value=latest
+
+      - uses: docker/metadata-action@v5
+        id: meta-ui
+        with:
+          images: ghcr.io/${{ github.repository }}/ui
           tags: |
             type=sha
             type=raw,value=latest
@@ -47,5 +76,37 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-server.outputs.tags }}
+          labels: ${{ steps.meta-server.outputs.labels }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.scrape-art
+          push: true
+          tags: ${{ steps.meta-scraper.outputs.tags }}
+          labels: ${{ steps.meta-scraper.outputs.labels }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./ui
+          push: true
+          tags: ${{ steps.meta-ui.outputs.tags }}
+          labels: ${{ steps.meta-ui.outputs.labels }}
+
+  helm:
+    needs: [test, test-ui]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package and push chart
+        run: |
+          helm package chart/preamp
+          helm push preamp-*.tgz oci://ghcr.io/${{ github.repository }}/charts

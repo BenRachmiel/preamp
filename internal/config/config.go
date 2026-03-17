@@ -18,14 +18,17 @@ type Config struct {
 	DevUsername   string // PREAMP_DEV_USERNAME: seed a credential on startup
 	DevPassword   string // PREAMP_DEV_PASSWORD: plaintext password for dev credential
 
+	// Admin API (JSON, internal network only — trusted-header auth).
+	AdminListenAddr string        // PREAMP_ADMIN_LISTEN (default ":4534")
+	CredentialTTL   time.Duration // PREAMP_CREDENTIAL_TTL (default 168h = 7 days)
+
 	// Management UI auth — exactly one of OIDCIssuer or AdminSecretFile may be set.
-	OIDCIssuer       string        // PREAMP_OIDC_ISSUER
-	OIDCClientID     string        // PREAMP_OIDC_CLIENT_ID
-	OIDCClientSecret string        // PREAMP_OIDC_CLIENT_SECRET
-	OIDCRedirectURI  string        // PREAMP_OIDC_REDIRECT_URI
-	AdminSecretFile  string        // PREAMP_ADMIN_SECRET_FILE (username:password)
-	CredentialTTL    time.Duration // PREAMP_CREDENTIAL_TTL (default 168h = 7 days)
-	ManageEnabled    bool          // derived: true if either OIDC or secret file configured
+	OIDCIssuer       string // PREAMP_OIDC_ISSUER
+	OIDCClientID     string // PREAMP_OIDC_CLIENT_ID
+	OIDCClientSecret string // PREAMP_OIDC_CLIENT_SECRET
+	OIDCRedirectURI  string // PREAMP_OIDC_REDIRECT_URI
+	AdminSecretFile  string // PREAMP_ADMIN_SECRET_FILE (username:password)
+	ManageEnabled    bool   // derived: true if either OIDC or secret file configured
 }
 
 func Load() (*Config, error) {
@@ -58,10 +61,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("creating cover art dir: %w", err)
 	}
 
-	c.EncryptionKey = envOr("PREAMP_ENCRYPTION_KEY", "")
 	c.AuthDisabled = envOr("PREAMP_NO_AUTH", "") == "1"
+	c.EncryptionKey = envOr("PREAMP_ENCRYPTION_KEY", "")
+	if c.EncryptionKey == "" && !c.AuthDisabled {
+		return nil, fmt.Errorf("PREAMP_ENCRYPTION_KEY is required (or set PREAMP_NO_AUTH=1 for dev)")
+	}
 	c.DevUsername = envOr("PREAMP_DEV_USERNAME", "")
 	c.DevPassword = envOr("PREAMP_DEV_PASSWORD", "")
+
+	// Admin API config.
+	c.AdminListenAddr = envOr("PREAMP_ADMIN_LISTEN", ":4534")
 
 	// Management UI config.
 	c.OIDCIssuer = envOr("PREAMP_OIDC_ISSUER", "")

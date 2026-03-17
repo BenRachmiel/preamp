@@ -3,6 +3,8 @@ services:
     build: .
     ports:
       - "4533:4533"
+    expose:
+      - "4534"
     environment:
       PREAMP_MUSIC_DIR: /music
       PREAMP_DATA_DIR: /data
@@ -24,6 +26,16 @@ services:
     secrets:
       - admin-secret
     restart: unless-stopped
+
+  preamp-ui:
+    build: ./ui
+    ports:
+      - "8080:80"
+    environment:
+      PREAMP_NO_AUTH: "true"
+      PREAMP_DEV_USERNAME: "ben"
+    depends_on:
+      - preamp
 
 secrets:
   admin-secret:

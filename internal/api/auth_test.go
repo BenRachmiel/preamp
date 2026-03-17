@@ -136,6 +136,63 @@ func TestAuthExpiredCredential(t *testing.T) {
 	}
 }
 
+func TestAuthRateLimiting(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+
+	// Send 10 failed auth attempts from the same IP.
+	for i := range 10 {
+		url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=wrong&s=salt%d", i)
+		resp := getJSON(t, srv, url)
+		if resp["status"] != "failed" {
+			t.Fatalf("attempt %d: expected failed", i)
+		}
+	}
+
+	// 11th attempt should be rate-limited (even with correct creds).
+	salt := "ratelimittest"
+	token := md5Hex("secret123" + salt)
+	url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=%s&s=%s", token, salt)
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "failed" {
+		t.Error("expected rate-limited request to fail")
+	}
+	apiErr := resp["error"].(map[string]any)
+	if msg, ok := apiErr["message"].(string); !ok || msg != "too many failed attempts" {
+		t.Errorf("error message = %v, want 'too many failed attempts'", apiErr["message"])
+	}
+}
+
+func TestAuthRateLimitClearsOnSuccess(t *testing.T) {
+	srv := testServerWithAuth(t, "alice", "secret123")
+
+	// Send 5 failed attempts.
+	for i := range 5 {
+		url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=wrong&s=salt%d", i)
+		getJSON(t, srv, url)
+	}
+
+	// A successful auth should clear the counter.
+	salt := "clearsalt"
+	token := md5Hex("secret123" + salt)
+	url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=%s&s=%s", token, salt)
+	resp := getJSON(t, srv, url)
+	if resp["status"] != "ok" {
+		t.Error("expected success after partial failures")
+	}
+
+	// Now send 10 more failures — should be allowed since counter was cleared.
+	for i := range 10 {
+		url := fmt.Sprintf("/rest/ping?f=json&u=alice&t=wrong&s=after%d", i)
+		getJSON(t, srv, url)
+	}
+
+	// 11th should now be rate-limited.
+	resp = getJSON(t, srv, "/rest/ping?f=json&u=alice&t=wrong&s=final")
+	if resp["status"] != "failed" {
+		t.Error("expected rate limit after 10 failures post-clear")
+	}
+}
+
 func TestEncryptDecryptPasswordRoundTrip(t *testing.T) {
 	password := "test-password-123"
 	encrypted, err := auth.EncryptPassword(testEncryptionKey, password)

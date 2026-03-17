@@ -14,7 +14,7 @@ func TestLoadValid(t *testing.T) {
 	t.Setenv("PREAMP_MUSIC_DIR", musicDir)
 	t.Setenv("PREAMP_DATA_DIR", dataDir)
 	t.Setenv("PREAMP_LISTEN", "")
-	t.Setenv("PREAMP_ENCRYPTION_KEY", "")
+	t.Setenv("PREAMP_NO_AUTH", "1")
 
 	cfg, err := Load()
 	if err != nil {
@@ -85,10 +85,25 @@ func TestLoadMusicDirIsFile(t *testing.T) {
 	}
 }
 
+func TestLoadMissingEncryptionKey(t *testing.T) {
+	t.Setenv("PREAMP_MUSIC_DIR", t.TempDir())
+	t.Setenv("PREAMP_ENCRYPTION_KEY", "")
+	t.Setenv("PREAMP_NO_AUTH", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for missing PREAMP_ENCRYPTION_KEY")
+	}
+	if !strings.Contains(err.Error(), "PREAMP_ENCRYPTION_KEY is required") {
+		t.Errorf("error = %q, want mention of PREAMP_ENCRYPTION_KEY", err)
+	}
+}
+
 func TestLoadCustomListenAddr(t *testing.T) {
 	t.Setenv("PREAMP_MUSIC_DIR", t.TempDir())
 	t.Setenv("PREAMP_DATA_DIR", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("PREAMP_LISTEN", ":9999")
+	t.Setenv("PREAMP_NO_AUTH", "1")
 
 	cfg, err := Load()
 	if err != nil {
@@ -103,6 +118,7 @@ func TestLoadCreatesDataDir(t *testing.T) {
 	nested := filepath.Join(t.TempDir(), "a", "b", "c")
 	t.Setenv("PREAMP_MUSIC_DIR", t.TempDir())
 	t.Setenv("PREAMP_DATA_DIR", nested)
+	t.Setenv("PREAMP_NO_AUTH", "1")
 
 	_, err := Load()
 	if err != nil {

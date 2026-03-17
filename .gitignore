@@ -24,3 +24,6 @@ covers/
 # Dev environment
 dev.env
 admin-secret
+
+ui/node_modules
+ui/dist

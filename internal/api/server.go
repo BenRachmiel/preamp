@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/BenRachmiel/preamp/internal/config"
@@ -12,13 +13,15 @@ import (
 )
 
 type Server struct {
-	cfg          *config.Config
-	db           *db.DB
-	log          *slog.Logger
-	mux          *http.ServeMux // top-level mux dispatching /rest/ and /manage/
-	subsonicMux  *http.ServeMux // Subsonic API routes
-	scanner      *scanner.Scanner
+	cfg           *config.Config
+	db            *db.DB
+	log           *slog.Logger
+	mux           *http.ServeMux // top-level mux dispatching /rest/ and /manage/
+	subsonicMux   *http.ServeMux // Subsonic API routes
+	adminMux      *http.ServeMux // Admin API routes
+	scanner       *scanner.Scanner
 	manageHandler http.Handler
+	authFailures  sync.Map // IP → *failureEntry
 }
 
 func NewServer(cfg *config.Config, database *db.DB, log *slog.Logger) *Server {
@@ -28,8 +31,10 @@ func NewServer(cfg *config.Config, database *db.DB, log *slog.Logger) *Server {
 		log:         log,
 		mux:         http.NewServeMux(),
 		subsonicMux: http.NewServeMux(),
+		adminMux:    http.NewServeMux(),
 	}
 	s.subsonicRoutes()
+	s.adminRoutes()
 	s.wireTopMux()
 	return s
 }
@@ -49,8 +54,32 @@ func (s *Server) wireTopMux() {
 	}
 }
 
+// Handler returns the combined handler (Subsonic + manage) for backward compat.
 func (s *Server) Handler() http.Handler {
-	return s.loggingMiddleware(s.mux)
+	return s.loggingMiddleware(s.maxBodyMiddleware(s.mux))
+}
+
+// SubsonicHandler returns the handler for the Subsonic API port (:4533).
+func (s *Server) SubsonicHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/rest/", s.authMiddleware(s.subsonicMux))
+	if s.manageHandler != nil {
+		mux.Handle("/manage/", s.manageHandler)
+		mux.Handle("/manage", s.manageHandler)
+	}
+	return s.loggingMiddleware(s.maxBodyMiddleware(mux))
+}
+
+// AdminHandler returns the handler for the admin API port (:4534).
+func (s *Server) AdminHandler() http.Handler {
+	return s.loggingMiddleware(s.maxBodyMiddleware(s.adminAuthMiddleware(s.adminMux)))
+}
+
+func (s *Server) maxBodyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		next.ServeHTTP(w, r)
+	})
 }
 
 type statusRecorder struct {
@@ -151,4 +180,15 @@ func (s *Server) subsonicRoutes() {
 	// Scanning
 	sub("startScan", s.handleStartScan)
 	sub("getScanStatus", s.handleGetScanStatus)
+}
+
+func (s *Server) adminRoutes() {
+	s.adminMux.HandleFunc("GET /admin/whoami", s.handleAdminWhoami)
+	s.adminMux.HandleFunc("GET /admin/credentials", s.handleAdminListCredentials)
+	s.adminMux.HandleFunc("POST /admin/credentials", s.handleAdminCreateCredential)
+	s.adminMux.HandleFunc("POST /admin/credentials/{id}/renew", s.handleAdminRenewCredential)
+	s.adminMux.HandleFunc("DELETE /admin/credentials/{id}", s.handleAdminDeleteCredential)
+	s.adminMux.HandleFunc("GET /admin/stats", s.handleAdminStats)
+	s.adminMux.HandleFunc("GET /admin/scan", s.handleAdminGetScanStatus)
+	s.adminMux.HandleFunc("POST /admin/scan", s.handleAdminStartScan)
 }

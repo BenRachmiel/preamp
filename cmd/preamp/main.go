@@ -94,9 +94,22 @@ func main() {
 		}
 	}()
 
-	httpSrv := &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: srv.Handler(),
+	// Subsonic API (public).
+	subsonicSrv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           srv.SubsonicHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// Admin API (internal only).
+	adminSrv := &http.Server{
+		Addr:              cfg.AdminListenAddr,
+		Handler:           srv.AdminHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Graceful shutdown.
@@ -104,9 +117,17 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Info("listening", "addr", cfg.ListenAddr)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("server error", "err", err)
+		log.Info("listening", "addr", cfg.ListenAddr, "port", "subsonic")
+		if err := subsonicSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("subsonic server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	go func() {
+		log.Info("listening", "addr", cfg.AdminListenAddr, "port", "admin")
+		if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("admin server error", "err", err)
 			os.Exit(1)
 		}
 	}()
@@ -117,8 +138,11 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown error", "err", err)
+	if err := subsonicSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("subsonic shutdown error", "err", err)
+	}
+	if err := adminSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("admin shutdown error", "err", err)
 	}
 }
 

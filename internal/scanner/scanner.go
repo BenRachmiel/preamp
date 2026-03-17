@@ -38,6 +38,10 @@ type Scanner struct {
 }
 
 func New(database *db.DB, musicDir, coverArtDir string, log *slog.Logger) *Scanner {
+	// Resolve to real path for canonical base (symlink-safe).
+	if resolved, err := filepath.EvalSymlinks(musicDir); err == nil {
+		musicDir = resolved
+	}
 	return &Scanner{
 		db:          database,
 		musicDir:    musicDir,
@@ -74,6 +78,9 @@ func (s *Scanner) Run() error {
 		if d.IsDir() {
 			return nil
 		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 
 		ext := strings.ToLower(filepath.Ext(path))
 		contentType, ok := supportedExts[ext]
@@ -81,7 +88,7 @@ func (s *Scanner) Run() error {
 			return nil
 		}
 
-		info, err := readTrack(path, ext, contentType)
+		info, err := safeReadTrack(path, ext, contentType)
 		if err != nil {
 			s.log.Warn("reading track", "path", path, "err", err)
 			return nil
@@ -158,6 +165,15 @@ type trackInfo struct {
 	bitrate     int // kbps
 	coverData   []byte
 	coverExt    string // jpg, png
+}
+
+func safeReadTrack(path, ext, contentType string) (info trackInfo, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic reading tags: %v", r)
+		}
+	}()
+	return readTrack(path, ext, contentType)
 }
 
 func readTrack(path, ext, contentType string) (trackInfo, error) {

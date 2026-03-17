@@ -5,8 +5,11 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"zombiezen.com/go/sqlite"
@@ -14,6 +17,57 @@ import (
 
 	"github.com/BenRachmiel/preamp/internal/auth"
 )
+
+const (
+	authFailureLimit    = 10
+	authFailureWindow   = 5 * time.Minute
+)
+
+type failureEntry struct {
+	count   atomic.Int32
+	resetAt atomic.Int64 // unix nano
+}
+
+func (s *Server) checkRateLimit(r *http.Request) bool {
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	val, _ := s.authFailures.LoadOrStore(ip, &failureEntry{})
+	entry := val.(*failureEntry)
+
+	resetAt := time.Unix(0, entry.resetAt.Load())
+	if time.Now().After(resetAt) {
+		entry.count.Store(0)
+		entry.resetAt.Store(time.Now().Add(authFailureWindow).UnixNano())
+	}
+	return entry.count.Load() >= int32(authFailureLimit)
+}
+
+func (s *Server) recordAuthFailure(r *http.Request) {
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	val, _ := s.authFailures.LoadOrStore(ip, &failureEntry{})
+	entry := val.(*failureEntry)
+
+	resetAt := time.Unix(0, entry.resetAt.Load())
+	if time.Now().After(resetAt) {
+		entry.count.Store(1)
+		entry.resetAt.Store(time.Now().Add(authFailureWindow).UnixNano())
+		return
+	}
+	entry.count.Add(1)
+}
+
+func (s *Server) clearAuthFailure(r *http.Request) {
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	s.authFailures.Delete(ip)
+}
 
 type contextKey string
 
@@ -51,9 +105,6 @@ type credential struct {
 // authMiddleware wraps the server mux and enforces Subsonic credential auth.
 // Auth priority: apiKey → t+s (token) → p (legacy). First present wins.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	if s.cfg.AuthDisabled {
-		s.log.Warn("auth disabled — all requests accepted without credential check")
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.AuthDisabled {
 			if u := r.FormValue("u"); u != "" {
@@ -63,13 +114,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		if s.checkRateLimit(r) {
+			writeError(w, r, 40, "too many failed attempts")
+			return
+		}
+
 		// apiKey auth: no u= required, checked against all non-expired credentials.
 		if apiKey := r.FormValue("apiKey"); apiKey != "" {
 			username, err := s.authenticateAPIKey(apiKey)
 			if err != nil {
+				s.recordAuthFailure(r)
 				writeError(w, r, 40, "wrong username or password")
 				return
 			}
+			s.clearAuthFailure(r)
 			r = r.WithContext(context.WithValue(r.Context(), usernameKey, username))
 			next.ServeHTTP(w, r)
 			return
@@ -87,9 +145,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if token := r.FormValue("t"); token != "" {
 			salt := r.FormValue("s")
 			if err := s.authenticateToken(username, token, salt); err != nil {
+				s.recordAuthFailure(r)
 				writeError(w, r, 40, "wrong username or password")
 				return
 			}
+			s.clearAuthFailure(r)
 			next.ServeHTTP(w, authedReq)
 			return
 		}
@@ -100,15 +160,18 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if strings.HasPrefix(p, "enc:") {
 				decoded, err := hex.DecodeString(p[4:])
 				if err != nil {
+					s.recordAuthFailure(r)
 					writeError(w, r, 40, "wrong username or password")
 					return
 				}
 				plain = string(decoded)
 			}
 			if err := s.authenticateLegacy(username, plain); err != nil {
+				s.recordAuthFailure(r)
 				writeError(w, r, 40, "wrong username or password")
 				return
 			}
+			s.clearAuthFailure(r)
 			next.ServeHTTP(w, authedReq)
 			return
 		}
