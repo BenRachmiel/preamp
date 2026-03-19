@@ -21,6 +21,7 @@ type Config struct {
 	// Admin API (JSON, internal network only — trusted-header auth).
 	AdminListenAddr string        // PREAMP_ADMIN_LISTEN (default ":4534")
 	CredentialTTL   time.Duration // PREAMP_CREDENTIAL_TTL (default 168h = 7 days)
+	CollectorToken  string        // PREAMP_COLLECTOR_TOKEN: bearer token for /admin/playhistory
 
 	// Management UI auth — exactly one of OIDCIssuer or AdminSecretFile may be set.
 	OIDCIssuer       string // PREAMP_OIDC_ISSUER
@@ -71,6 +72,7 @@ func Load() (*Config, error) {
 
 	// Admin API config.
 	c.AdminListenAddr = envOr("PREAMP_ADMIN_LISTEN", ":4534")
+	c.CollectorToken = envOr("PREAMP_COLLECTOR_TOKEN", "")
 
 	// Management UI config.
 	c.OIDCIssuer = envOr("PREAMP_OIDC_ISSUER", "")

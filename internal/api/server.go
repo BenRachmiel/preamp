@@ -72,7 +72,10 @@ func (s *Server) SubsonicHandler() http.Handler {
 
 // AdminHandler returns the handler for the admin API port (:4534).
 func (s *Server) AdminHandler() http.Handler {
-	return s.loggingMiddleware(s.maxBodyMiddleware(s.adminAuthMiddleware(s.adminMux)))
+	mux := http.NewServeMux()
+	mux.Handle("GET /admin/playhistory", s.collectorAuth(http.HandlerFunc(s.handlePlayHistory)))
+	mux.Handle("/", s.adminAuthMiddleware(s.adminMux))
+	return s.loggingMiddleware(s.maxBodyMiddleware(mux))
 }
 
 func (s *Server) maxBodyMiddleware(next http.Handler) http.Handler {

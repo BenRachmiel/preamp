@@ -55,6 +55,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "preamp.secretName" . }}
                   key: PREAMP_ENCRYPTION_KEY
+            {{- if .Values.config.collectorTokenEnabled }}
+            - name: PREAMP_COLLECTOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "preamp.secretName" . }}
+                  key: PREAMP_COLLECTOR_TOKEN
+            {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.probes.liveness.path }}

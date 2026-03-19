@@ -21,7 +21,8 @@ import (
 )
 
 type testServerOpts struct {
-	encryptionKey string // if set, auth is enabled
+	encryptionKey  string // if set, auth is enabled
+	collectorToken string // if set, enables /admin/playhistory
 }
 
 // testServer sets up a Server with an in-memory-like temp DB and returns it + cleanup.
@@ -39,9 +40,12 @@ func testServer(t *testing.T, opts ...testServerOpts) *Server {
 		AuthDisabled: true,
 	}
 
-	if len(opts) > 0 && opts[0].encryptionKey != "" {
-		cfg.AuthDisabled = false
-		cfg.EncryptionKey = opts[0].encryptionKey
+	if len(opts) > 0 {
+		if opts[0].encryptionKey != "" {
+			cfg.AuthDisabled = false
+			cfg.EncryptionKey = opts[0].encryptionKey
+		}
+		cfg.CollectorToken = opts[0].collectorToken
 	}
 
 	os.MkdirAll(cfg.CoverArtDir, 0o755)

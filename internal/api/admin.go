@@ -2,10 +2,13 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"math/big"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -298,6 +301,109 @@ func (s *Server) handleAdminStartScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusOK, map[string]any{"scanning": true, "count": s.scanner.Count()})
+}
+
+// --- play history (collector endpoint) ---
+
+// collectorAuth authenticates via bearer token (for the collector service) or
+// falls through to the standard admin auth (Remote-User header) if no bearer token.
+func (s *Server) collectorAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.CollectorToken == "" {
+			http.NotFound(w, r)
+			return
+		}
+
+		if hdr := r.Header.Get("Authorization"); strings.HasPrefix(hdr, "Bearer ") {
+			token := hdr[len("Bearer "):]
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.CollectorToken)) == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+			return
+		}
+
+		// No bearer token — fall through to admin auth (Remote-User / dev mode).
+		s.adminAuthMiddleware(next).ServeHTTP(w, r)
+	})
+}
+
+type playHistoryEntry struct {
+	Rowid    int64  `json:"rowid"`
+	PlayedAt string `json:"playedAt"`
+	SongID   string `json:"songId"`
+	Title    string `json:"title"`
+	Duration int    `json:"duration"`
+	Track    int    `json:"track"`
+	Disc     int    `json:"disc"`
+	Year     int    `json:"year"`
+	Genre    string `json:"genre"`
+	Bitrate  int    `json:"bitrate"`
+	AlbumID  string `json:"albumId"`
+	Album    string `json:"album"`
+	ArtistID string `json:"artistId"`
+	Artist   string `json:"artist"`
+}
+
+func (s *Server) handlePlayHistory(w http.ResponseWriter, r *http.Request) {
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	conn, put, err := s.db.ReadConn()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+	defer put()
+
+	entries := []playHistoryEntry{}
+	err = sqlitex.ExecuteTransient(conn,
+		`SELECT ph.rowid, ph.played_at,
+		        s.id, s.title, s.duration, s.track, s.disc, s.year, s.genre, s.bitrate,
+		        al.id, al.name, a.id, a.name
+		 FROM play_history ph
+		 JOIN song s ON s.id = ph.song_id
+		 JOIN album al ON al.id = s.album_id
+		 JOIN artist a ON a.id = al.artist_id
+		 WHERE ph.rowid > ?
+		 ORDER BY ph.rowid ASC
+		 LIMIT ?`,
+		&sqlitex.ExecOptions{
+			Args: []any{since, limit},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				entries = append(entries, playHistoryEntry{
+					Rowid:    stmt.ColumnInt64(0),
+					PlayedAt: stmt.ColumnText(1),
+					SongID:   stmt.ColumnText(2),
+					Title:    stmt.ColumnText(3),
+					Duration: stmt.ColumnInt(4),
+					Track:    stmt.ColumnInt(5),
+					Disc:     stmt.ColumnInt(6),
+					Year:     stmt.ColumnInt(7),
+					Genre:    stmt.ColumnText(8),
+					Bitrate:  stmt.ColumnInt(9),
+					AlbumID:  stmt.ColumnText(10),
+					Album:    stmt.ColumnText(11),
+					ArtistID: stmt.ColumnText(12),
+					Artist:   stmt.ColumnText(13),
+				})
+				return nil
+			},
+		})
+	if err != nil {
+		s.log.Error("play history query", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
 // --- helpers ---

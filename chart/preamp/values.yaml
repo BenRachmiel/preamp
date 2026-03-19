@@ -11,6 +11,7 @@ config:
   dataDir: /data
   listen: ":4533"
   credentialTTL: "168h"
+  collectorTokenEnabled: false  # set true + add PREAMP_COLLECTOR_TOKEN to secret
 
 # -- UI + oauth2-proxy sidecar (set enabled: false to disable the management UI)
 ui:
