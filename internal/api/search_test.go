@@ -51,12 +51,36 @@ func TestSearch3ByArtist(t *testing.T) {
 	}
 }
 
-func TestSearch3MissingQuery(t *testing.T) {
+func TestSearch3EmptyQueryReturnsAll(t *testing.T) {
 	srv := testServer(t)
-	resp := getJSON(t, srv, "/rest/search3?")
+	seedData(t, srv)
+	resp := getJSON(t, srv, "/rest/search3?query=")
 
-	if resp["status"] != "failed" {
-		t.Errorf("expected failed status for missing query")
+	if resp["status"] != "ok" {
+		t.Fatalf("expected ok status for empty query, got %v", resp["status"])
+	}
+	sr := resp["searchResult3"].(map[string]any)
+	artists := sr["artist"].([]any)
+	if len(artists) < 2 {
+		t.Errorf("expected at least 2 artists for empty query, got %d", len(artists))
+	}
+}
+
+func TestSearch3Offset(t *testing.T) {
+	srv := testServer(t)
+	seedData(t, srv)
+
+	// Get all artists, then verify offset skips some.
+	all := getJSON(t, srv, "/rest/search3?query=&artistCount=100")
+	allSR := all["searchResult3"].(map[string]any)
+	total := len(allSR["artist"].([]any))
+
+	offset := getJSON(t, srv, "/rest/search3?query=&artistCount=100&artistOffset=1")
+	offSR := offset["searchResult3"].(map[string]any)
+	got := len(offSR["artist"].([]any))
+
+	if got != total-1 {
+		t.Errorf("expected %d artists with offset=1, got %d", total-1, got)
 	}
 }
 
