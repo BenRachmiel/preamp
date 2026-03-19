@@ -42,8 +42,8 @@ func TestScanRealLibrary(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if sc.Count() != 29 {
-		t.Errorf("count = %d, want 29", sc.Count())
+	if sc.Count() != 37 {
+		t.Errorf("count = %d, want 37", sc.Count())
 	}
 
 	// Verify artists.
@@ -60,8 +60,8 @@ func TestScanRealLibrary(t *testing.T) {
 			return nil
 		},
 	})
-	if artistCount != 2 {
-		t.Errorf("artists = %d, want 2", artistCount)
+	if artistCount != 3 {
+		t.Errorf("artists = %d, want 3", artistCount)
 	}
 
 	// Verify albums.
@@ -72,8 +72,8 @@ func TestScanRealLibrary(t *testing.T) {
 			return nil
 		},
 	})
-	if albumCount != 2 {
-		t.Errorf("albums = %d, want 2", albumCount)
+	if albumCount != 3 {
+		t.Errorf("albums = %d, want 3", albumCount)
 	}
 
 	// Verify album stats were updated.
@@ -96,8 +96,8 @@ func TestScanRealLibrary(t *testing.T) {
 			return nil
 		},
 	})
-	if ftsCount != 29 {
-		t.Errorf("FTS entries = %d, want 29", ftsCount)
+	if ftsCount != 37 {
+		t.Errorf("FTS entries = %d, want 37", ftsCount)
 	}
 
 	// Verify FTS search works.
@@ -186,8 +186,8 @@ func TestScanIdempotent(t *testing.T) {
 			return nil
 		},
 	})
-	if songCount != 29 {
-		t.Errorf("songs after rescan = %d, want 29", songCount)
+	if songCount != 37 {
+		t.Errorf("songs after rescan = %d, want 37", songCount)
 	}
 }
 

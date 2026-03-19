@@ -11,7 +11,7 @@ OIDC / Secret File
   Management UI ── Credential Minting (per-client, TTL-bound)
         |
         v
-  Subsonic API (30 endpoints)
+  Subsonic API (34 endpoints)
         |
     +---+---+
     v       v
@@ -34,7 +34,7 @@ PREAMP_DEV_PASSWORD=admin \
 go run ./cmd/preamp/
 ```
 
-Server listens on `:4533`. Point your Subsonic client at `http://localhost:4533` with the dev credentials above.
+Server listens on `:4533` (Subsonic API) and `:4534` (admin API). Point your Subsonic client at `http://localhost:4533` with the dev credentials above.
 
 ### Docker
 
@@ -47,6 +47,10 @@ docker compose up --build
 ```
 
 The container image builds `FROM scratch` — just the static binary, nothing else. No shell, no libc, no package manager.
+
+### Helm
+
+A Helm chart is available in `chart/preamp/` with deployment, service, ingress, HTTPRoute, secrets, and PVCs.
 
 | Metric | Value |
 |--------|-------|
@@ -63,14 +67,17 @@ The container image builds `FROM scratch` — just the static binary, nothing el
 | `PREAMP_MUSIC_DIR` | *required* | Path to music library |
 | `PREAMP_DATA_DIR` | `./data` | Database and cover art cache |
 | `PREAMP_LISTEN` | `:4533` | HTTP listen address |
-| `PREAMP_ENCRYPTION_KEY` | *required* | 32-char hex key for AES-GCM credential encryption |
+| `PREAMP_ADMIN_LISTEN` | `:4534` | Admin API listen address |
+| `PREAMP_ENCRYPTION_KEY` | *required* | 32/64-char hex key for AES-256/128 credential encryption |
 | `PREAMP_NO_AUTH` | — | Set to `1` to disable auth (dev only) |
 | `PREAMP_DEV_USERNAME` | — | Seed a dev credential on startup |
 | `PREAMP_DEV_PASSWORD` | — | Plaintext password for dev credential |
 
 ### Management UI
 
-The management UI lives at `/manage/` and supports two auth backends (mutually exclusive):
+Two options for credential management:
+
+**Go templates + HTMX** — built-in at `/manage/`, supports two auth backends (mutually exclusive):
 
 | Variable | Description |
 |----------|-------------|
@@ -81,11 +88,13 @@ The management UI lives at `/manage/` and supports two auth backends (mutually e
 | `PREAMP_OIDC_REDIRECT_URI` | Callback URL (e.g. `https://music.example.com/manage/callback`) |
 | `PREAMP_CREDENTIAL_TTL` | Credential lifetime (default `168h` / 7 days) |
 
-If neither is set, the management UI is disabled and credentials are managed via dev env vars only.
+**Preact SPA** (`preamp-ui`) — separate container, communicates with the admin API on `:4534` via trusted-header auth (`Remote-User`). Use with oauth2-proxy for OIDC. See `docker-compose.yml`.
+
+If neither is configured, credentials are managed via dev env vars only.
 
 ## What's Implemented
 
-### Subsonic API — 30 endpoints
+### Subsonic API — 34 endpoints
 
 All P1 and P2 endpoints for full compatibility with Symfonium, Feishin, and Supersonic.
 
@@ -108,11 +117,15 @@ Three Subsonic auth methods supported, checked in order:
 2. **Token** — `t=md5(password+salt)&s=salt`, server stores AES-GCM encrypted password
 3. **Legacy** — `p=<password>`, plaintext or hex-encoded
 
-Credentials are minted via the management UI with configurable TTL, per-client labels, and instant revocation. API key auth is the default; legacy token/password auth is opt-in per credential.
+Credentials are minted via the management UI with configurable TTL, per-client labels, and instant revocation. API key auth is the default; legacy token/password auth is opt-in per credential. Rate limited: 10 failures per 5 minutes per IP.
 
 ### Management UI
 
-Go templates + HTMX. Mint, renew, and revoke Subsonic credentials from a browser. Credentials are scoped per user — you can only manage your own.
+Two options: built-in Go templates + HTMX at `/manage/`, or the Preact SPA (`preamp-ui`) as a separate container with oauth2-proxy. Both mint, renew, and revoke Subsonic credentials. Credentials are scoped per user.
+
+### Admin API
+
+JSON API on `:4534` — credential CRUD, library stats, scan control. Trusted-header auth (`Remote-User` / `X-Forwarded-User`). Used by the Preact SPA; also usable directly for automation.
 
 ### Scanner
 
@@ -147,7 +160,7 @@ No ORM, no web framework, no config library. Streaming uses `http.ServeContent` 
 
 ## Testing
 
-179 tests across 5 packages:
+217 tests across 5 packages:
 
 ```bash
 go test ./... -count=1
@@ -160,14 +173,6 @@ This is a focused Subsonic server, not a kitchen sink. Some things are explicitl
 ### Transcoding
 
 No on-the-fly transcoding. Clients get the original file. If this becomes needed, the plan is to externalize `ffmpeg` as a sidecar container rather than bloating the server binary. The streaming endpoint already supports the `maxBitRate` parameter shape — it just needs the transcoding backend.
-
-### Helm Chart
-
-Coming. The container is ready, compose works, but the Helm chart with proper secret management, ingress, and health checks is next.
-
-### OIDC (in production)
-
-The OIDC auth backend is implemented and tested but hasn't been validated against a real IdP in production yet. File-secret auth works today. For OIDC, the `FROM scratch` image will need CA certificates copied from the builder stage (~200KB).
 
 ### Video, Podcasts, Chat, Radio, Jukebox
 
