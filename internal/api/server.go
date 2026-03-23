@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"sync"
 	"time"
@@ -75,6 +76,14 @@ func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /admin/playhistory", s.collectorAuth(http.HandlerFunc(s.handlePlayHistory)))
 	mux.Handle("/", s.adminAuthMiddleware(s.adminMux))
+
+	// pprof on the admin port — no auth, internal-only.
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+
 	return s.loggingMiddleware(s.maxBodyMiddleware(mux))
 }
 
