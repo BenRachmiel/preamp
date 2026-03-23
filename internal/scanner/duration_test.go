@@ -28,7 +28,13 @@ func TestParseMP3DurationRealFiles(t *testing.T) {
 	}
 
 	for _, path := range matches[:min(5, len(matches))] {
-		dur, br := parseDuration(path, ".mp3", log)
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("Open %s: %v", path, err)
+		}
+		stat, _ := f.Stat()
+		dur, br := parseDuration(f, stat.Size(), ".mp3", log)
+		f.Close()
 		t.Logf("%s: duration=%ds bitrate=%dkbps", filepath.Base(path), dur, br)
 		if dur <= 0 {
 			t.Errorf("duration should be > 0 for %s, got %d", filepath.Base(path), dur)
@@ -82,7 +88,13 @@ func TestParseFLACDuration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dur, _, err := parseFLACDuration(path)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+	stat, _ := f.Stat()
+	dur, _, err := parseFLACDuration(f, stat.Size())
 	if err != nil {
 		t.Fatalf("parseFLACDuration: %v", err)
 	}
@@ -98,7 +110,13 @@ func TestParseDurationFallbackReturnsZero(t *testing.T) {
 	os.WriteFile(path, []byte("this is not audio data"), 0o644)
 
 	log := testLogger()
-	dur, br := parseDuration(path, ".mp3", log)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+	stat, _ := f.Stat()
+	dur, br := parseDuration(f, stat.Size(), ".mp3", log)
 	// Should not crash. May return 0 if ffprobe is unavailable.
 	t.Logf("garbage file: dur=%d br=%d", dur, br)
 }

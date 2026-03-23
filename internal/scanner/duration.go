@@ -18,23 +18,23 @@ import (
 const maxSyncSearchBytes = 65536
 
 // parseDuration returns accurate duration (seconds) and bitrate (kbps) for an audio file.
-// It tries native parsing for MP3/FLAC first, then falls back to ffprobe.
-func parseDuration(path, ext string, log *slog.Logger) (durationSecs, bitrateKbps int) {
+// It tries native parsing for MP3/FLAC using the already-open file, then falls back to ffprobe.
+func parseDuration(f *os.File, fileSize int64, ext string, log *slog.Logger) (durationSecs, bitrateKbps int) {
 	switch ext {
 	case ".mp3":
-		d, br, err := parseMP3Duration(path)
+		d, br, err := parseMP3Duration(f, fileSize)
 		if err == nil && d > 0 {
 			return d, br
 		}
 	case ".flac":
-		d, br, err := parseFLACDuration(path)
+		d, br, err := parseFLACDuration(f, fileSize)
 		if err == nil && d > 0 {
 			return d, br
 		}
 	}
 
-	// Fallback: ffprobe
-	d, br, err := ffprobeDuration(path, log)
+	// Fallback: ffprobe (needs the path, opens its own process).
+	d, br, err := ffprobeDuration(f.Name(), log)
 	if err == nil && d > 0 {
 		return d, br
 	}
@@ -51,12 +51,11 @@ var mp3BitrateTable = [16]int{
 var mp3SampleRateTable = [4]int{44100, 48000, 32000, 0}
 
 // parseMP3Duration parses MP3 duration from Xing/VBRI VBR header, or first-frame CBR estimation.
-func parseMP3Duration(path string) (durationSecs, bitrateKbps int, err error) {
-	f, err := os.Open(path)
-	if err != nil {
+// Expects the file seeked to position 0.
+func parseMP3Duration(f *os.File, fileSize int64) (durationSecs, bitrateKbps int, err error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return 0, 0, err
 	}
-	defer f.Close()
 
 	// Skip ID3v2 tag if present.
 	var header [10]byte
@@ -153,9 +152,6 @@ func parseMP3Duration(path string) (durationSecs, bitrateKbps int, err error) {
 				totalSamples := totalFrames * samplesPerFrame
 				dur := totalSamples / sampleRate
 
-				// Calculate average bitrate.
-				stat, _ := f.Stat()
-				fileSize := stat.Size()
 				avgBitrate := 0
 				if dur > 0 {
 					avgBitrate = int(fileSize*8/1000) / dur
@@ -165,8 +161,7 @@ func parseMP3Duration(path string) (durationSecs, bitrateKbps int, err error) {
 		}
 
 		// No VBR header — CBR estimation from file size.
-		stat, _ := f.Stat()
-		audioBytesEst := stat.Size() - frameStart
+		audioBytesEst := fileSize - frameStart
 		dur := int(audioBytesEst * 8 / int64(bitrate) / 1000)
 		return dur, bitrate, nil
 	}
@@ -175,12 +170,11 @@ func parseMP3Duration(path string) (durationSecs, bitrateKbps int, err error) {
 }
 
 // parseFLACDuration reads the STREAMINFO metadata block to compute duration.
-func parseFLACDuration(path string) (durationSecs, bitrateKbps int, err error) {
-	f, err := os.Open(path)
-	if err != nil {
+// Expects the file seeked to position 0.
+func parseFLACDuration(f *os.File, fileSize int64) (durationSecs, bitrateKbps int, err error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return 0, 0, err
 	}
-	defer f.Close()
 
 	// Verify fLaC marker.
 	var marker [4]byte
@@ -219,10 +213,9 @@ func parseFLACDuration(path string) (durationSecs, bitrateKbps int, err error) {
 	dur := int(totalSamples / int64(sampleRate))
 
 	// Bitrate from file size.
-	stat, _ := f.Stat()
 	bitrate := 0
 	if dur > 0 {
-		bitrate = int(stat.Size()*8/1000) / dur
+		bitrate = int(fileSize*8/1000) / dur
 	}
 	return dur, bitrate, nil
 }

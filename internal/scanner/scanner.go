@@ -75,7 +75,6 @@ func (s *Scanner) Run() error {
 
 	const batchSize = 1000
 	batch := make([]trackInfo, 0, batchSize)
-	total := 0
 
 	// Collect folder art discovered during walk: dir → art file path.
 	folderArt := make(map[string]string)
@@ -87,8 +86,6 @@ func (s *Scanner) Run() error {
 		if err := s.insertBatch(conn, batch); err != nil {
 			return fmt.Errorf("inserting batch: %w", err)
 		}
-		total += len(batch)
-		s.count.Store(int64(total))
 		batch = batch[:0] // reuse backing array
 		return nil
 	}
@@ -124,19 +121,14 @@ func (s *Scanner) Run() error {
 			return nil
 		}
 
-		info, err := safeReadTrack(path, ext, contentType)
+		info, err := safeReadTrack(path, ext, contentType, s.log)
 		if err != nil {
 			s.log.Warn("reading track", "path", path, "err", err)
 			return nil
 		}
 
-		dur, br := parseDuration(path, ext, s.log)
-		if dur > 0 {
-			info.duration = dur
-			info.bitrate = br
-		}
-
 		batch = append(batch, info)
+		s.count.Add(1)
 		if len(batch) >= batchSize {
 			if err := flush(); err != nil {
 				return err
@@ -168,7 +160,7 @@ func (s *Scanner) Run() error {
 		return fmt.Errorf("rebuilding FTS index: %w", err)
 	}
 
-	s.log.Info("scan complete", "tracks", total)
+	s.log.Info("scan complete", "tracks", s.count.Load())
 	return nil
 }
 
@@ -188,16 +180,16 @@ type trackInfo struct {
 	bitrate     int // kbps
 }
 
-func safeReadTrack(path, ext, contentType string) (info trackInfo, err error) {
+func safeReadTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic reading tags: %v", r)
 		}
 	}()
-	return readTrack(path, ext, contentType)
+	return readTrack(path, ext, contentType, log)
 }
 
-func readTrack(path, ext, contentType string) (trackInfo, error) {
+func readTrack(path, ext, contentType string, log *slog.Logger) (trackInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return trackInfo{}, err
@@ -222,30 +214,33 @@ func readTrack(path, ext, contentType string) (trackInfo, error) {
 		info.title = strings.TrimSuffix(filepath.Base(path), ext)
 		info.artist = "Unknown Artist"
 		info.album = filepath.Base(filepath.Dir(path))
-		return info, nil
+	} else {
+		info.title = meta.Title()
+		if info.title == "" {
+			info.title = strings.TrimSuffix(filepath.Base(path), ext)
+		}
+		info.artist = meta.Artist()
+		if info.artist == "" {
+			info.artist = "Unknown Artist"
+		}
+		info.album = meta.Album()
+		if info.album == "" {
+			info.album = filepath.Base(filepath.Dir(path))
+		}
+		info.genre = meta.Genre()
+		info.year = meta.Year()
+		t, _ := meta.Track()
+		info.track = t
+		d, _ := meta.Disc()
+		info.disc = d
 	}
 
-	info.title = meta.Title()
-	if info.title == "" {
-		info.title = strings.TrimSuffix(filepath.Base(path), ext)
+	// Parse duration from the same open file handle (avoids a second open).
+	dur, br := parseDuration(f, stat.Size(), ext, log)
+	if dur > 0 {
+		info.duration = dur
+		info.bitrate = br
 	}
-	info.artist = meta.Artist()
-	if info.artist == "" {
-		info.artist = "Unknown Artist"
-	}
-	info.album = meta.Album()
-	if info.album == "" {
-		info.album = filepath.Base(filepath.Dir(path))
-	}
-	info.genre = meta.Genre()
-	info.year = meta.Year()
-	t, _ := meta.Track()
-	info.track = t
-	d, _ := meta.Disc()
-	info.disc = d
-
-	// Duration and bitrate are parsed separately via parseDuration()
-	// after tag reading, since it needs the logger for ffprobe fallback.
 
 	return info, nil
 }

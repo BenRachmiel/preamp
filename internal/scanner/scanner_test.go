@@ -250,7 +250,8 @@ func TestSafeReadTrackRecoversPanic(t *testing.T) {
 	fpath := filepath.Join(tmpDir, "test.mp3")
 	os.WriteFile(fpath, []byte("not a real mp3"), 0o644)
 
-	info, err := safeReadTrack(fpath, ".mp3", "audio/mpeg")
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	info, err := safeReadTrack(fpath, ".mp3", "audio/mpeg", log)
 	if err != nil {
 		t.Fatalf("safeReadTrack: %v", err)
 	}
@@ -341,7 +342,8 @@ func TestReadTrackFallbackNoTags(t *testing.T) {
 	fpath := filepath.Join(tmpDir, "test.mp3")
 	os.WriteFile(fpath, []byte("not a real mp3"), 0o644)
 
-	info, err := readTrack(fpath, ".mp3", "audio/mpeg")
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	info, err := readTrack(fpath, ".mp3", "audio/mpeg", log)
 	if err != nil {
 		t.Fatalf("readTrack: %v", err)
 	}
