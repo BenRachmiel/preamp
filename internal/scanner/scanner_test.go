@@ -243,7 +243,7 @@ func TestScanSkipsSymlinks(t *testing.T) {
 }
 
 func TestSafeReadTrackRecoversPanic(t *testing.T) {
-	// safeReadTrack should recover from panics and return an error.
+	// readTrack should recover from panics and return an error.
 	// We can't easily make readTrack panic without a crafted file,
 	// so test the wrapper directly by verifying it handles normal errors.
 	tmpDir := t.TempDir()
@@ -251,9 +251,9 @@ func TestSafeReadTrackRecoversPanic(t *testing.T) {
 	os.WriteFile(fpath, []byte("not a real mp3"), 0o644)
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	info, err := safeReadTrack(fpath, ".mp3", "audio/mpeg", log)
+	info, err := readTrack(fpath, ".mp3", "audio/mpeg", log)
 	if err != nil {
-		t.Fatalf("safeReadTrack: %v", err)
+		t.Fatalf("readTrack: %v", err)
 	}
 	if info.title != "test" {
 		t.Errorf("title = %q, want %q", info.title, "test")

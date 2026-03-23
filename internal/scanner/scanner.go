@@ -95,45 +95,41 @@ func (s *Scanner) Run() error {
 			s.log.Warn("walk error", "path", path, "err", err)
 			return nil
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
+		if d.IsDir() || d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 
-		name := strings.ToLower(d.Name())
-		dir := filepath.Dir(path)
-
-		// Check if this file is folder art before checking audio extensions.
-		if _, seen := folderArt[dir]; !seen {
-			for _, artName := range folderArtNames {
-				if name == artName {
-					folderArt[dir] = path
-					return nil
+		// Check extension first — most files won't match, so avoid
+		// heavier string ops (ToLower full name, filepath.Dir) until needed.
+		ext := strings.ToLower(filepath.Ext(path))
+		if contentType, ok := supportedExts[ext]; ok {
+			info, err := readTrack(path, ext, contentType, s.log)
+			if err != nil {
+				s.log.Warn("reading track", "path", path, "err", err)
+				return nil
+			}
+			batch = append(batch, info)
+			s.count.Add(1)
+			if len(batch) >= batchSize {
+				if err := flush(); err != nil {
+					return err
 				}
 			}
-		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-		contentType, ok := supportedExts[ext]
-		if !ok {
 			return nil
 		}
 
-		info, err := safeReadTrack(path, ext, contentType, s.log)
-		if err != nil {
-			s.log.Warn("reading track", "path", path, "err", err)
-			return nil
-		}
-
-		batch = append(batch, info)
-		s.count.Add(1)
-		if len(batch) >= batchSize {
-			if err := flush(); err != nil {
-				return err
+		// Check for folder art only if we haven't found one in this dir yet.
+		name := strings.ToLower(d.Name())
+		for _, artName := range folderArtNames {
+			if name == artName {
+				dir := filepath.Dir(path)
+				if _, seen := folderArt[dir]; !seen {
+					folderArt[dir] = path
+				}
+				return nil
 			}
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -180,16 +176,12 @@ type trackInfo struct {
 	bitrate     int // kbps
 }
 
-func safeReadTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo, err error) {
+func readTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic reading tags: %v", r)
 		}
 	}()
-	return readTrack(path, ext, contentType, log)
-}
-
-func readTrack(path, ext, contentType string, log *slog.Logger) (trackInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return trackInfo{}, err
@@ -201,7 +193,7 @@ func readTrack(path, ext, contentType string, log *slog.Logger) (trackInfo, erro
 		return trackInfo{}, err
 	}
 
-	info := trackInfo{
+	info = trackInfo{
 		path:        path,
 		ext:         strings.TrimPrefix(ext, "."),
 		contentType: contentType,
@@ -289,51 +281,37 @@ func (s *Scanner) insertBatch(conn *sqlite.Conn, tracks []trackInfo) error {
 }
 
 func (s *Scanner) upsertArtist(conn *sqlite.Conn, name string) (string, error) {
-	var id string
-	err := sqlitex.ExecuteTransient(conn, `SELECT id FROM artist WHERE name = ?`, &sqlitex.ExecOptions{
-		Args: []any{name},
+	id := db.NewID()
+	var resultID string
+	err := sqlitex.ExecuteTransient(conn, `
+		INSERT INTO artist (id, name) VALUES (?, ?)
+		ON CONFLICT(name) DO UPDATE SET name = name
+		RETURNING id
+	`, &sqlitex.ExecOptions{
+		Args: []any{id, name},
 		ResultFunc: func(stmt *sqlite.Stmt) error {
-			id = stmt.ColumnText(0)
+			resultID = stmt.ColumnText(0)
 			return nil
 		},
 	})
-	if err != nil {
-		return "", err
-	}
-	if id != "" {
-		return id, nil
-	}
-
-	id = db.NewID()
-	err = sqlitex.ExecuteTransient(conn, `INSERT INTO artist (id, name) VALUES (?, ?)`, &sqlitex.ExecOptions{
-		Args: []any{id, name},
-	})
-	return id, err
+	return resultID, err
 }
 
 func (s *Scanner) upsertAlbum(conn *sqlite.Conn, artistID, name string, year int, genre string) (string, error) {
-	var id string
-	err := sqlitex.ExecuteTransient(conn, `SELECT id FROM album WHERE artist_id = ? AND name = ?`, &sqlitex.ExecOptions{
-		Args: []any{artistID, name},
+	id := db.NewID()
+	var resultID string
+	err := sqlitex.ExecuteTransient(conn, `
+		INSERT INTO album (id, artist_id, name, year, genre) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(artist_id, name) DO UPDATE SET year = excluded.year, genre = excluded.genre
+		RETURNING id
+	`, &sqlitex.ExecOptions{
+		Args: []any{id, artistID, name, year, genre},
 		ResultFunc: func(stmt *sqlite.Stmt) error {
-			id = stmt.ColumnText(0)
+			resultID = stmt.ColumnText(0)
 			return nil
 		},
 	})
-	if err != nil {
-		return "", err
-	}
-	if id != "" {
-		return id, nil
-	}
-
-	id = db.NewID()
-	err = sqlitex.ExecuteTransient(conn, `
-		INSERT INTO album (id, artist_id, name, year, genre) VALUES (?, ?, ?, ?, ?)
-	`, &sqlitex.ExecOptions{
-		Args: []any{id, artistID, name, year, genre},
-	})
-	return id, err
+	return resultID, err
 }
 
 func (s *Scanner) upsertSong(conn *sqlite.Conn, t trackInfo, artistID, albumID string) error {

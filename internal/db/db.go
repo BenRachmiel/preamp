@@ -53,6 +53,9 @@ func (db *DB) init() error {
 		"PRAGMA busy_timeout = 5000",
 		"PRAGMA synchronous = NORMAL",
 		"PRAGMA journal_mode = WAL",
+		"PRAGMA cache_size = -64000",
+		"PRAGMA mmap_size = 30000000",
+		"PRAGMA temp_store = MEMORY",
 	} {
 		if err := sqlitex.ExecuteTransient(conn, pragma, nil); err != nil {
 			return fmt.Errorf("pragma %q: %w", pragma, err)

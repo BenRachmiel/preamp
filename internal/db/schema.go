@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS album (
 	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_album_artist ON album(artist_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_album_artist_name ON album(artist_id, name);
 CREATE INDEX IF NOT EXISTS idx_album_created ON album(created_at);
 
 CREATE TABLE IF NOT EXISTS song (
