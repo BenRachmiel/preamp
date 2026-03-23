@@ -20,6 +20,12 @@ ui:
     repository: ghcr.io/benrachmiel/preamp/images/preamp-ui
     tag: latest
     pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
   oauthProxy:
     image:
       repository: quay.io/oauth2-proxy/oauth2-proxy

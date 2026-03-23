@@ -119,6 +119,26 @@ jobs:
           REPO="${{ github.repository }}"
           helm push preamp-*.tgz "oci://ghcr.io/${REPO,,}/charts"
 
+  notify-rig:
+    needs: [build-server, helm]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract chart version and short SHA
+        id: meta
+        run: |
+          echo "short=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "chart=$(grep '^version:' chart/preamp/Chart.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.RIG_DISPATCH_TOKEN }}
+          repository: BenRachmiel/rig
+          event-type: subchart-update
+          client-payload: '{"source":"preamp","chartVersion":"${{ steps.meta.outputs.chart }}","imageTag":"${{ steps.meta.outputs.short }}"}'
+
   update-gitops:
     needs: [build-server, build-ui]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -154,9 +154,12 @@ func (s *ManageServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 		s.sessions.Delete(sess.ID)
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:   sessionCookieName,
-		Path:   "/manage/",
-		MaxAge: -1,
+		Name:     sessionCookieName,
+		Path:     "/manage/",
+		MaxAge:   -1,
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(w, r, "/manage/login", http.StatusFound)
 }

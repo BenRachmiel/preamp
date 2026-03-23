@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 )
+
+const readPoolSize = 4
 
 // DB holds separate write and read connection pools per design constraints.
 type DB struct {
@@ -27,7 +30,7 @@ func Open(path string) (*DB, error) {
 	}
 
 	read, err := sqlitex.NewPool(path, sqlitex.PoolOptions{
-		PoolSize: 4,
+		PoolSize: readPoolSize,
 		Flags:    sqlite.OpenReadOnly | sqlite.OpenWAL,
 	})
 	if err != nil {
@@ -51,6 +54,7 @@ func (db *DB) init() error {
 	defer db.write.Put(conn)
 
 	for _, pragma := range []string{
+		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 5000",
 		"PRAGMA synchronous = NORMAL",
 		"PRAGMA journal_mode = WAL",
@@ -68,13 +72,17 @@ func (db *DB) init() error {
 	}
 
 	// Idempotent column migration — SQLite has no ADD COLUMN IF NOT EXISTS.
-	// Ignore "duplicate column name" error for existing DBs.
-	_ = sqlitex.ExecuteTransient(conn,
-		`ALTER TABLE song ADD COLUMN file_mtime INTEGER NOT NULL DEFAULT 0`, nil)
+	// Only ignore "duplicate column name" errors; propagate anything else.
+	if err := sqlitex.ExecuteTransient(conn,
+		`ALTER TABLE song ADD COLUMN file_mtime INTEGER NOT NULL DEFAULT 0`, nil); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migration file_mtime: %w", err)
+		}
+	}
 
 	// Set busy_timeout on all read connections so they retry instead of
 	// failing immediately when the writer holds the WAL lock.
-	for range 4 {
+	for range readPoolSize {
 		rc, err := db.read.Take(context.Background())
 		if err != nil {
 			return fmt.Errorf("taking read conn for pragma: %w", err)

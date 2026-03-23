@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,6 +67,15 @@ func Load() (*Config, error) {
 	c.EncryptionKey = envOr("PREAMP_ENCRYPTION_KEY", "")
 	if c.EncryptionKey == "" && !c.AuthDisabled {
 		return nil, fmt.Errorf("PREAMP_ENCRYPTION_KEY is required (or set PREAMP_NO_AUTH=1 for dev)")
+	}
+	if c.EncryptionKey != "" {
+		keyBytes, err := hex.DecodeString(c.EncryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("PREAMP_ENCRYPTION_KEY is not valid hex: %w", err)
+		}
+		if n := len(keyBytes); n != 16 && n != 32 {
+			return nil, fmt.Errorf("PREAMP_ENCRYPTION_KEY must decode to 16 or 32 bytes (AES-128/256), got %d", n)
+		}
 	}
 	c.DevUsername = envOr("PREAMP_DEV_USERNAME", "")
 	c.DevPassword = envOr("PREAMP_DEV_PASSWORD", "")

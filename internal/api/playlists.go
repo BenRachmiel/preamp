@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -156,6 +157,12 @@ func (s *Server) handleCreatePlaylist(w http.ResponseWriter, r *http.Request) {
 	playlistID := r.FormValue("playlistId")
 	name := r.FormValue("name")
 	songIDs := r.Form["songId"]
+
+	const maxPlaylistSongs = 10_000
+	if len(songIDs) > maxPlaylistSongs {
+		writeError(w, r, 0, fmt.Sprintf("too many songs: %d (max %d)", len(songIDs), maxPlaylistSongs))
+		return
+	}
 
 	// Subsonic spec: playlistId = update existing, otherwise name is required.
 	if playlistID == "" && name == "" {

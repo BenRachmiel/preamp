@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/md5"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -207,7 +208,7 @@ func (s *Server) authenticateToken(username, token, salt string) error {
 			continue
 		}
 		expected := md5Hex(password + salt)
-		if strings.EqualFold(token, expected) {
+		if subtle.ConstantTimeCompare([]byte(strings.ToLower(token)), []byte(strings.ToLower(expected))) == 1 {
 			return nil
 		}
 	}

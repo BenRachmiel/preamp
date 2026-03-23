@@ -64,6 +64,7 @@ func (s *SessionStore) Create(username string) (string, *http.Cookie) {
 		Value:    id,
 		Path:     "/manage/",
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	}

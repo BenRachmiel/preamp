@@ -142,3 +142,57 @@ func TestEnvOrSet(t *testing.T) {
 		t.Errorf("envOr = %q, want custom", got)
 	}
 }
+
+func TestLoadEncryptionKeyInvalidHex(t *testing.T) {
+	t.Setenv("PREAMP_MUSIC_DIR", t.TempDir())
+	t.Setenv("PREAMP_DATA_DIR", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("PREAMP_ENCRYPTION_KEY", "not-valid-hex!")
+	t.Setenv("PREAMP_NO_AUTH", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid hex encryption key")
+	}
+	if !strings.Contains(err.Error(), "not valid hex") {
+		t.Errorf("error = %q, want mention of not valid hex", err)
+	}
+}
+
+func TestLoadEncryptionKeyWrongLength(t *testing.T) {
+	t.Setenv("PREAMP_MUSIC_DIR", t.TempDir())
+	t.Setenv("PREAMP_DATA_DIR", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("PREAMP_ENCRYPTION_KEY", "aabbccdd") // 4 bytes
+	t.Setenv("PREAMP_NO_AUTH", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for wrong-length encryption key")
+	}
+	if !strings.Contains(err.Error(), "16 or 32 bytes") {
+		t.Errorf("error = %q, want mention of 16 or 32 bytes", err)
+	}
+}
+
+func TestLoadEncryptionKeyValid16Bytes(t *testing.T) {
+	t.Setenv("PREAMP_MUSIC_DIR", t.TempDir())
+	t.Setenv("PREAMP_DATA_DIR", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("PREAMP_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef") // 16 bytes
+	t.Setenv("PREAMP_NO_AUTH", "")
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestLoadEncryptionKeyValid32Bytes(t *testing.T) {
+	t.Setenv("PREAMP_MUSIC_DIR", t.TempDir())
+	t.Setenv("PREAMP_DATA_DIR", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("PREAMP_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") // 32 bytes
+	t.Setenv("PREAMP_NO_AUTH", "")
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}

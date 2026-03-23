@@ -184,14 +184,13 @@ func (s *Scanner) Run() error {
 
 		ext := strings.ToLower(filepath.Ext(path))
 		if contentType, ok := supportedExts[ext]; ok {
-			seenPaths[path] = true
-
 			// Skip unchanged files: cheap stat comparison avoids expensive open+read.
 			info, err := d.Info()
 			if err != nil {
 				s.log.Warn("stat error", "path", path, "err", err)
 				return nil
 			}
+			seenPaths[path] = true
 			mtime := info.ModTime().UnixNano()
 			size := info.Size()
 			if known, ok := knownFiles[path]; ok && known.mtime == mtime && known.size == size {
@@ -259,6 +258,11 @@ func (s *Scanner) Run() error {
 	// Rebuild FTS5 index.
 	if err := s.rebuildFTS(conn); err != nil {
 		return fmt.Errorf("rebuilding FTS index: %w", err)
+	}
+
+	// Give the query planner fresh statistics after bulk changes.
+	if err := sqlitex.ExecuteTransient(conn, "PRAGMA optimize", nil); err != nil {
+		return fmt.Errorf("pragma optimize: %w", err)
 	}
 
 	s.log.Info("scan complete", "tracks", s.count.Load())

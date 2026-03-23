@@ -11,6 +11,10 @@ spec:
       targetPort: http
       protocol: TCP
       name: subsonic
+    - port: 4534
+      targetPort: admin
+      protocol: TCP
+      name: admin
     {{- if .Values.ui.enabled }}
     - port: 4180
       targetPort: oauth-proxy

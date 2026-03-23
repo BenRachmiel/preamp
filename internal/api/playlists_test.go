@@ -1,6 +1,12 @@
 package api
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+)
 
 func TestCreatePlaylist(t *testing.T) {
 	srv := testServer(t)
@@ -162,6 +168,44 @@ func TestPlaylistPerUser(t *testing.T) {
 	plList = pls["playlist"].([]any)
 	if len(plList) != 1 {
 		t.Errorf("expected 1 playlist for alice, got %d", len(plList))
+	}
+}
+
+func TestCreatePlaylistTooManySongs(t *testing.T) {
+	srv := testServer(t)
+
+	// Build form with >10k songId values.
+	form := url.Values{}
+	form.Set("u", "testuser")
+	form.Set("name", "Huge")
+	form.Set("f", "json")
+	for range 10_001 {
+		form.Add("songId", "s1")
+	}
+
+	req := httptest.NewRequest("GET", "/rest/createPlaylist?"+form.Encode(), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	// Should be a Subsonic error response.
+	body := w.Body.String()
+	if body == "" {
+		t.Fatal("empty body")
+	}
+	// Parse and check for error status.
+	var wrapper subsonicJSON
+	if err := json.Unmarshal(w.Body.Bytes(), &wrapper); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(wrapper.Response, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp["status"] != "failed" {
+		t.Errorf("expected failed status for >10k songs, got %v", resp["status"])
 	}
 }
 
