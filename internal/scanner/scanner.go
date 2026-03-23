@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,11 +58,10 @@ func (s *Scanner) Count() int {
 
 // scanWorkers is the number of concurrent file-reading goroutines.
 // Sized for I/O latency hiding, not CPU: workers spend most of their time
-// blocked on NFS syscalls, so we need enough concurrency to keep the pipe
-// full regardless of how little CPU the container has.
-// Uses 2× GOMAXPROCS (which is cgroup-aware in Go 1.25+) as a baseline,
-// clamped to [4, 16].
-var scanWorkers = max(4, min(16, 2*runtime.GOMAXPROCS(0)))
+// blocked on storage syscalls, so we need enough concurrency to keep the
+// storage backend saturated. Decoupled from GOMAXPROCS — CPU per worker is
+// near-zero after bulk-read optimization; the limit is I/O concurrency.
+const scanWorkers = 32
 
 // trackJob carries a discovered audio file from the walker to a parse worker.
 type trackJob struct {
@@ -100,7 +98,8 @@ func (s *Scanner) Run() error {
 	jobs := make(chan trackJob, 100)
 
 	// Stage 2: parse workers send results to DB writer.
-	results := make(chan trackInfo, 100)
+	// Buffer sized to prevent DB writer backpressure from stalling I/O workers.
+	results := make(chan trackInfo, 500)
 
 	// --- Parse workers ---
 	var parseWg sync.WaitGroup

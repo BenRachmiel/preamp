@@ -138,7 +138,7 @@ func TestReadID3v2SkipsAPIC(t *testing.T) {
 }
 
 func TestReadID3v2OversizedAPIC(t *testing.T) {
-	// Tag: TIT2 frame, then APIC >64KB, then TPE1 after the cap.
+	// Tag: TIT2 frame, then APIC >4KB, then TPE1 after the cap.
 	// We expect TIT2 to parse, APIC to cause a clean stop, TPE1 lost.
 	var buf bytes.Buffer
 
@@ -151,8 +151,8 @@ func TestReadID3v2OversizedAPIC(t *testing.T) {
 	buf.Write([]byte{0, 0})
 	buf.Write(title)
 
-	// APIC frame: 80KB of fake image data (exceeds 64KB read cap)
-	apicData := make([]byte, 80*1024)
+	// APIC frame: 8KB of fake image data (exceeds 4KB read cap)
+	apicData := make([]byte, 8*1024)
 	buf.WriteString("APIC")
 	binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(apicData)))
 	buf.Write(sizeBuf[:])
@@ -187,9 +187,9 @@ func TestReadID3v2OversizedAPIC(t *testing.T) {
 	if tags.title != "Before Art" {
 		t.Errorf("title = %q, want %q (should parse frame before APIC)", tags.title, "Before Art")
 	}
-	// TPE1 is beyond the 64KB read cap — graceful degradation means it's lost.
+	// TPE1 is beyond the 4KB read cap — graceful degradation means it's lost.
 	if tags.artist != "" {
-		t.Errorf("artist = %q, want empty (frame after 64KB cap should be lost)", tags.artist)
+		t.Errorf("artist = %q, want empty (frame after 4KB cap should be lost)", tags.artist)
 	}
 	// tagSize must reflect the full declared size, not the read cap.
 	wantTagSize := int64(10 + size)

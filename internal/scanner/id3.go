@@ -20,8 +20,13 @@ type id3Tags struct {
 	tagSize int64 // total tag size including header (offset where audio begins)
 }
 
+// id3ReadCap is the maximum bytes to bulk-read from an ID3v2 tag body.
+// 4KB covers all text frames in practice — APIC (album art) is always placed
+// after text frames by real-world taggers, and text metadata rarely exceeds 2KB.
+const id3ReadCap = 4096
+
 // readID3v2 reads only text frames from an ID3v2 tag using a bulk read to
-// minimize syscalls. Reads min(tagSize, 64KB) into a pooled buffer, then
+// minimize syscalls. Reads min(tagSize, 4KB) into a stack buffer, then
 // parses all frames from memory. Returns false if no valid ID3v2 header.
 func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 	// Read 10-byte ID3v2 header (1 syscall).
@@ -41,15 +46,13 @@ func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 	// Syncsafe integer: 4 × 7 bits.
 	rawTagSize := int64(hdr[6])<<21 | int64(hdr[7])<<14 | int64(hdr[8])<<7 | int64(hdr[9])
 
-	// Bulk-read min(rawTagSize, 64KB) into a pooled buffer (1 syscall).
+	// Bulk-read min(rawTagSize, 4KB) into a stack buffer (1 syscall).
 	readSize := rawTagSize
-	if readSize > maxSyncSearchBytes {
-		readSize = maxSyncSearchBytes
+	if readSize > id3ReadCap {
+		readSize = id3ReadCap
 	}
 
-	buf := chunkPool.Get().([]byte)
-	defer chunkPool.Put(buf)
-
+	var buf [id3ReadCap]byte
 	n, _ := io.ReadAtLeast(r, buf[:readSize], int(min(readSize, 10)))
 	if n == 0 {
 		return id3Tags{tagSize: 10 + rawTagSize}, true
