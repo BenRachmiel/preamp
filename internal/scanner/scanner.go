@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/dhowden/tag"
@@ -55,9 +57,23 @@ func (s *Scanner) Count() int {
 	return int(s.count.Load())
 }
 
-// Run performs a full scan of the music directory. Tracks are processed in
-// streaming batches to bound peak memory to O(batchSize) instead of
-// O(totalTracks).
+// scanWorkers is the number of concurrent file-reading goroutines.
+// Kept small to avoid overwhelming NFS but enough to hide per-file latency.
+var scanWorkers = min(4, runtime.NumCPU())
+
+// trackJob carries a discovered audio file from the walker to a parse worker.
+type trackJob struct {
+	path        string
+	ext         string
+	contentType string
+}
+
+// Run performs a full scan of the music directory using a pipeline:
+//
+//	walker → parse workers (concurrent I/O) → DB writer (serialized batches)
+//
+// This hides NFS latency behind parallel file reads while keeping SQLite
+// writes serialized on the single write connection.
 func (s *Scanner) Run() error {
 	if !s.scanning.CompareAndSwap(false, true) {
 		return fmt.Errorf("scan already in progress")
@@ -65,7 +81,7 @@ func (s *Scanner) Run() error {
 	defer s.scanning.Store(false)
 	s.count.Store(0)
 
-	s.log.Info("starting scan", "dir", s.musicDir)
+	s.log.Info("starting scan", "dir", s.musicDir, "workers", scanWorkers)
 
 	conn, put, err := s.db.WriteConn()
 	if err != nil {
@@ -73,24 +89,70 @@ func (s *Scanner) Run() error {
 	}
 	defer put()
 
-	const batchSize = 1000
-	batch := make([]trackInfo, 0, batchSize)
-
 	// Collect folder art discovered during walk: dir → art file path.
 	folderArt := make(map[string]string)
 
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		if err := s.insertBatch(conn, batch); err != nil {
-			return fmt.Errorf("inserting batch: %w", err)
-		}
-		batch = batch[:0] // reuse backing array
-		return nil
+	// Stage 1: walker sends jobs to parse workers.
+	jobs := make(chan trackJob, 100)
+
+	// Stage 2: parse workers send results to DB writer.
+	results := make(chan trackInfo, 100)
+
+	// --- Parse workers ---
+	var parseWg sync.WaitGroup
+	parseWg.Add(scanWorkers)
+	for range scanWorkers {
+		go func() {
+			defer parseWg.Done()
+			for job := range jobs {
+				info, err := readTrack(job.path, job.ext, job.contentType, s.log)
+				if err != nil {
+					s.log.Warn("reading track", "path", job.path, "err", err)
+					continue
+				}
+				results <- info
+			}
+		}()
 	}
 
-	err = filepath.WalkDir(s.musicDir, func(path string, d fs.DirEntry, err error) error {
+	// Close results channel once all workers finish.
+	go func() {
+		parseWg.Wait()
+		close(results)
+	}()
+
+	// --- DB writer (single goroutine) ---
+	const batchSize = 1000
+	var writerErr error
+	var writerWg sync.WaitGroup
+	writerWg.Add(1)
+	go func() {
+		defer writerWg.Done()
+		batch := make([]trackInfo, 0, batchSize)
+		for info := range results {
+			batch = append(batch, info)
+			s.count.Add(1)
+			if len(batch) >= batchSize {
+				if err := s.insertBatch(conn, batch); err != nil {
+					writerErr = fmt.Errorf("inserting batch: %w", err)
+					// Drain remaining results so workers don't block.
+					for range results {
+					}
+					return
+				}
+				batch = batch[:0]
+			}
+		}
+		// Flush remaining.
+		if len(batch) > 0 {
+			if err := s.insertBatch(conn, batch); err != nil {
+				writerErr = fmt.Errorf("inserting batch: %w", err)
+			}
+		}
+	}()
+
+	// --- Walker (runs in current goroutine) ---
+	walkErr := filepath.WalkDir(s.musicDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			s.log.Warn("walk error", "path", path, "err", err)
 			return nil
@@ -99,22 +161,9 @@ func (s *Scanner) Run() error {
 			return nil
 		}
 
-		// Check extension first — most files won't match, so avoid
-		// heavier string ops (ToLower full name, filepath.Dir) until needed.
 		ext := strings.ToLower(filepath.Ext(path))
 		if contentType, ok := supportedExts[ext]; ok {
-			info, err := readTrack(path, ext, contentType, s.log)
-			if err != nil {
-				s.log.Warn("reading track", "path", path, "err", err)
-				return nil
-			}
-			batch = append(batch, info)
-			s.count.Add(1)
-			if len(batch) >= batchSize {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
+			jobs <- trackJob{path: path, ext: ext, contentType: contentType}
 			return nil
 		}
 
@@ -132,13 +181,14 @@ func (s *Scanner) Run() error {
 
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("walking music dir: %w", err)
-	}
+	close(jobs) // Signal workers that walking is done.
+	writerWg.Wait()
 
-	// Flush remaining tracks.
-	if err := flush(); err != nil {
-		return err
+	if walkErr != nil {
+		return fmt.Errorf("walking music dir: %w", walkErr)
+	}
+	if writerErr != nil {
+		return writerErr
 	}
 
 	// Assign folder art to albums and clear stale cover_art paths.

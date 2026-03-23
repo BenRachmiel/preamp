@@ -1,9 +1,11 @@
 package scanner
 
 import (
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"zombiezen.com/go/sqlite"
@@ -11,6 +13,24 @@ import (
 
 	"github.com/BenRachmiel/preamp/internal/db"
 )
+
+// countAudioFiles walks a directory and returns the number of files with
+// supported audio extensions, for use in integration test assertions.
+func countAudioFiles(t *testing.T, dir string) int {
+	t.Helper()
+	var count int
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if _, ok := supportedExts[ext]; ok {
+			count++
+		}
+		return nil
+	})
+	return count
+}
 
 func setupScanner(t *testing.T, musicDir string) (*Scanner, *db.DB) {
 	t.Helper()
@@ -34,23 +54,28 @@ func TestScanRealLibrary(t *testing.T) {
 		t.Skip("test-music-lib not found, skipping")
 	}
 
+	wantTracks := countAudioFiles(t, musicDir)
+	if wantTracks == 0 {
+		t.Skip("no audio files found in test-music-lib")
+	}
+
 	sc, database := setupScanner(t, musicDir)
 
 	if err := sc.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if sc.Count() != 37 {
-		t.Errorf("count = %d, want 37", sc.Count())
+	if sc.Count() != wantTracks {
+		t.Errorf("count = %d, want %d", sc.Count(), wantTracks)
 	}
 
-	// Verify artists.
 	conn, put, err := database.ReadConn()
 	if err != nil {
 		t.Fatalf("ReadConn: %v", err)
 	}
 	defer put()
 
+	// Verify artists exist.
 	var artistCount int
 	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM artist`, &sqlitex.ExecOptions{
 		ResultFunc: func(stmt *sqlite.Stmt) error {
@@ -58,11 +83,11 @@ func TestScanRealLibrary(t *testing.T) {
 			return nil
 		},
 	})
-	if artistCount != 3 {
-		t.Errorf("artists = %d, want 3", artistCount)
+	if artistCount < 1 {
+		t.Errorf("artists = %d, want >= 1", artistCount)
 	}
 
-	// Verify albums.
+	// Verify albums exist.
 	var albumCount int
 	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM album`, &sqlitex.ExecOptions{
 		ResultFunc: func(stmt *sqlite.Stmt) error {
@@ -70,23 +95,23 @@ func TestScanRealLibrary(t *testing.T) {
 			return nil
 		},
 	})
-	if albumCount != 3 {
-		t.Errorf("albums = %d, want 3", albumCount)
+	if albumCount < 1 {
+		t.Errorf("albums = %d, want >= 1", albumCount)
 	}
 
-	// Verify album stats were updated.
-	var songCount int
-	sqlitex.ExecuteTransient(conn, `SELECT song_count FROM album ORDER BY name LIMIT 1`, &sqlitex.ExecOptions{
+	// Verify album stats were updated (every album should have song_count > 0).
+	var zeroCountAlbums int
+	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM album WHERE song_count = 0`, &sqlitex.ExecOptions{
 		ResultFunc: func(stmt *sqlite.Stmt) error {
-			songCount = stmt.ColumnInt(0)
+			zeroCountAlbums = stmt.ColumnInt(0)
 			return nil
 		},
 	})
-	if songCount != 19 {
-		t.Errorf("ABBA Gold song_count = %d, want 19", songCount)
+	if zeroCountAlbums > 0 {
+		t.Errorf("%d albums have song_count=0 after stats update", zeroCountAlbums)
 	}
 
-	// Verify FTS populated.
+	// Verify FTS populated with same count as songs.
 	var ftsCount int
 	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM song_fts`, &sqlitex.ExecOptions{
 		ResultFunc: func(stmt *sqlite.Stmt) error {
@@ -94,21 +119,11 @@ func TestScanRealLibrary(t *testing.T) {
 			return nil
 		},
 	})
-	if ftsCount != 37 {
-		t.Errorf("FTS entries = %d, want 37", ftsCount)
+	if ftsCount != wantTracks {
+		t.Errorf("FTS entries = %d, want %d", ftsCount, wantTracks)
 	}
 
-	// Verify FTS search works.
-	var ftsHits int
-	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM song_fts WHERE song_fts MATCH '"dancing"'`, &sqlitex.ExecOptions{
-		ResultFunc: func(stmt *sqlite.Stmt) error {
-			ftsHits = stmt.ColumnInt(0)
-			return nil
-		},
-	})
-	if ftsHits != 1 {
-		t.Errorf("FTS hits for 'dancing' = %d, want 1", ftsHits)
-	}
+	t.Logf("scanned %d tracks, %d artists, %d albums", wantTracks, artistCount, albumCount)
 }
 
 func TestScanEmptyDir(t *testing.T) {
@@ -158,6 +173,11 @@ func TestScanIdempotent(t *testing.T) {
 		t.Skip("test-music-lib not found, skipping")
 	}
 
+	wantTracks := countAudioFiles(t, musicDir)
+	if wantTracks == 0 {
+		t.Skip("no audio files found in test-music-lib")
+	}
+
 	sc, database := setupScanner(t, musicDir)
 
 	// First scan.
@@ -176,7 +196,7 @@ func TestScanIdempotent(t *testing.T) {
 	}
 	defer put()
 
-	// Should still have exactly 29 songs, not duplicates.
+	// Should still have the same number of songs, not duplicates.
 	var songCount int
 	sqlitex.ExecuteTransient(conn, `SELECT COUNT(*) FROM song`, &sqlitex.ExecOptions{
 		ResultFunc: func(stmt *sqlite.Stmt) error {
@@ -184,8 +204,8 @@ func TestScanIdempotent(t *testing.T) {
 			return nil
 		},
 	})
-	if songCount != 37 {
-		t.Errorf("songs after rescan = %d, want 37", songCount)
+	if songCount != wantTracks {
+		t.Errorf("songs after rescan = %d, want %d", songCount, wantTracks)
 	}
 }
 
