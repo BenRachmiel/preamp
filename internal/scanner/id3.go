@@ -20,45 +20,42 @@ type id3Tags struct {
 	tagSize int64 // total tag size including header (offset where audio begins)
 }
 
-// id3ReadCap is the maximum bytes to bulk-read from an ID3v2 tag body.
-// 4KB covers all text frames in practice — APIC (album art) is always placed
-// after text frames by real-world taggers, and text metadata rarely exceeds 2KB.
-const id3ReadCap = 4096
+// id3ReadCap is the maximum bytes to read from the start of a file for ID3v2
+// parsing: 10-byte header + 4KB tag body. 4KB covers all text frames in
+// practice — APIC (album art) is always placed after text frames by
+// real-world taggers, and text metadata rarely exceeds 2KB.
+const id3ReadCap = 10 + 4096
 
-// readID3v2 reads only text frames from an ID3v2 tag using a bulk read to
-// minimize syscalls. Reads min(tagSize, 4KB) into a stack buffer, then
-// parses all frames from memory. Returns false if no valid ID3v2 header.
-func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
-	// Read 10-byte ID3v2 header (1 syscall).
-	var hdr [10]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+// readID3v2 reads only text frames from an ID3v2 tag. Performs a single read
+// of min(10+tagSize, 4106) bytes to get both the header and tag body in one
+// syscall, then parses frames from memory. Returns false if no valid ID3v2
+// header.
+func readID3v2(r io.Reader) (id3Tags, bool) {
+	// Single read: header + tag body in one syscall.
+	var buf [id3ReadCap]byte
+	n, _ := io.ReadAtLeast(r, buf[:], 10)
+	if n < 10 {
 		return id3Tags{}, false
 	}
-	if hdr[0] != 'I' || hdr[1] != 'D' || hdr[2] != '3' {
+
+	if buf[0] != 'I' || buf[1] != 'D' || buf[2] != '3' {
 		return id3Tags{}, false
 	}
 
-	major := hdr[3] // 2, 3, or 4
+	major := buf[3] // 2, 3, or 4
 	if major < 2 || major > 4 {
 		return id3Tags{}, false
 	}
 
 	// Syncsafe integer: 4 × 7 bits.
-	rawTagSize := int64(hdr[6])<<21 | int64(hdr[7])<<14 | int64(hdr[8])<<7 | int64(hdr[9])
+	rawTagSize := int64(buf[6])<<21 | int64(buf[7])<<14 | int64(buf[8])<<7 | int64(buf[9])
 
-	// Bulk-read min(rawTagSize, 4KB) into a stack buffer (1 syscall).
-	readSize := rawTagSize
-	if readSize > id3ReadCap {
-		readSize = id3ReadCap
+	body := buf[10:n]
+	if int64(len(body)) > rawTagSize {
+		body = body[:rawTagSize]
 	}
 
-	var buf [id3ReadCap]byte
-	n, _ := io.ReadAtLeast(r, buf[:readSize], int(min(readSize, 10)))
-	if n == 0 {
-		return id3Tags{tagSize: 10 + rawTagSize}, true
-	}
-
-	tags := parseID3v2Frames(buf[:n], major, rawTagSize, hdr[5])
+	tags := parseID3v2Frames(body, major, rawTagSize, buf[5])
 	tags.tagSize = 10 + rawTagSize
 	return tags, true
 }

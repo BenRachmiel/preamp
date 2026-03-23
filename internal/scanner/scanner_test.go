@@ -356,6 +356,164 @@ func TestScanClearsStaleCoverArt(t *testing.T) {
 	}
 }
 
+// queryInt runs a single-row integer query on the connection.
+func queryInt(t *testing.T, conn *sqlite.Conn, sql string) int {
+	t.Helper()
+	var n int
+	sqlitex.ExecuteTransient(conn, sql, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			n = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	return n
+}
+
+func TestScanSkipsUnchanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "track.mp3"), []byte("not a real mp3"), 0o644)
+
+	sc, database := setupScanner(t, tmpDir)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	firstCount := sc.Count()
+	if firstCount != 1 {
+		t.Fatalf("first scan count = %d, want 1", firstCount)
+	}
+
+	// Second scan — file unchanged, should skip it (count still increments via walker skip path).
+	if err := sc.Run(); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	// Verify DB still has exactly 1 song.
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+	if n := queryInt(t, conn, `SELECT COUNT(*) FROM song`); n != 1 {
+		t.Errorf("songs after rescan = %d, want 1", n)
+	}
+}
+
+func TestScanDetectsModified(t *testing.T) {
+	tmpDir := t.TempDir()
+	fpath := filepath.Join(tmpDir, "track.mp3")
+	os.WriteFile(fpath, []byte("not a real mp3"), 0o644)
+
+	sc, database := setupScanner(t, tmpDir)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Read original mtime from DB.
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	var origMtime int64
+	sqlitex.ExecuteTransient(conn, `SELECT file_mtime FROM song LIMIT 1`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			origMtime = stmt.ColumnInt64(0)
+			return nil
+		},
+	})
+	put()
+
+	// Modify the file — change content and bump mtime.
+	os.WriteFile(fpath, []byte("modified mp3 content here"), 0o644)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	conn, put, err = database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+
+	var newMtime int64
+	sqlitex.ExecuteTransient(conn, `SELECT file_mtime FROM song LIMIT 1`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			newMtime = stmt.ColumnInt64(0)
+			return nil
+		},
+	})
+
+	if newMtime == origMtime {
+		t.Error("file_mtime should have changed after modification")
+	}
+}
+
+func TestScanDetectsDeleted(t *testing.T) {
+	tmpDir := t.TempDir()
+	fpath := filepath.Join(tmpDir, "track.mp3")
+	os.WriteFile(fpath, []byte("not a real mp3"), 0o644)
+
+	sc, database := setupScanner(t, tmpDir)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Remove the file.
+	os.Remove(fpath)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+
+	if n := queryInt(t, conn, `SELECT COUNT(*) FROM song`); n != 0 {
+		t.Errorf("songs after delete = %d, want 0", n)
+	}
+	// Orphan album and artist should be cleaned up too.
+	if n := queryInt(t, conn, `SELECT COUNT(*) FROM album`); n != 0 {
+		t.Errorf("albums after delete = %d, want 0", n)
+	}
+	if n := queryInt(t, conn, `SELECT COUNT(*) FROM artist`); n != 0 {
+		t.Errorf("artists after delete = %d, want 0", n)
+	}
+}
+
+func TestScanDetectsNewFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "track1.mp3"), []byte("not a real mp3"), 0o644)
+
+	sc, database := setupScanner(t, tmpDir)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Add a new file.
+	os.WriteFile(filepath.Join(tmpDir, "track2.mp3"), []byte("another fake mp3"), 0o644)
+
+	if err := sc.Run(); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+
+	if n := queryInt(t, conn, `SELECT COUNT(*) FROM song`); n != 2 {
+		t.Errorf("songs after adding file = %d, want 2", n)
+	}
+}
+
 func TestReadTrackFallbackNoTags(t *testing.T) {
 	// Create a dummy file with no valid tags.
 	tmpDir := t.TempDir()

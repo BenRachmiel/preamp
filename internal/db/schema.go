@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS song (
 	bitrate      INTEGER NOT NULL DEFAULT 0,  -- kbps
 	content_type TEXT NOT NULL,               -- audio/mpeg, etc.
 	path         TEXT NOT NULL UNIQUE,        -- absolute fs path
+	file_mtime   INTEGER NOT NULL DEFAULT 0, -- stat ModTime().UnixNano()
 	created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_song_album ON song(album_id);

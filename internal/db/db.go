@@ -67,6 +67,11 @@ func (db *DB) init() error {
 		return err
 	}
 
+	// Idempotent column migration — SQLite has no ADD COLUMN IF NOT EXISTS.
+	// Ignore "duplicate column name" error for existing DBs.
+	_ = sqlitex.ExecuteTransient(conn,
+		`ALTER TABLE song ADD COLUMN file_mtime INTEGER NOT NULL DEFAULT 0`, nil)
+
 	// Set busy_timeout on all read connections so they retry instead of
 	// failing immediately when the writer holds the WAL lock.
 	for range 4 {

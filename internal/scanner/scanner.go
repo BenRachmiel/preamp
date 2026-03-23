@@ -91,6 +91,24 @@ func (s *Scanner) Run() error {
 	}
 	defer put()
 
+	// Build path→(mtime, size) lookup from existing DB state for incremental skip.
+	type knownFile struct{ mtime, size int64 }
+	knownFiles := make(map[string]knownFile)
+	if err := sqlitex.ExecuteTransient(conn, `SELECT path, file_mtime, size FROM song`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			knownFiles[stmt.ColumnText(0)] = knownFile{
+				mtime: stmt.ColumnInt64(1),
+				size:  stmt.ColumnInt64(2),
+			}
+			return nil
+		},
+	}); err != nil {
+		return fmt.Errorf("loading known files: %w", err)
+	}
+
+	// Track which paths we see during walk for deletion detection.
+	seenPaths := make(map[string]bool, len(knownFiles))
+
 	// Collect folder art discovered during walk: dir → art file path.
 	folderArt := make(map[string]string)
 
@@ -166,6 +184,21 @@ func (s *Scanner) Run() error {
 
 		ext := strings.ToLower(filepath.Ext(path))
 		if contentType, ok := supportedExts[ext]; ok {
+			seenPaths[path] = true
+
+			// Skip unchanged files: cheap stat comparison avoids expensive open+read.
+			info, err := d.Info()
+			if err != nil {
+				s.log.Warn("stat error", "path", path, "err", err)
+				return nil
+			}
+			mtime := info.ModTime().UnixNano()
+			size := info.Size()
+			if known, ok := knownFiles[path]; ok && known.mtime == mtime && known.size == size {
+				s.count.Add(1)
+				return nil
+			}
+
 			jobs <- trackJob{path: path, ext: ext, contentType: contentType}
 			return nil
 		}
@@ -194,6 +227,20 @@ func (s *Scanner) Run() error {
 		return writerErr
 	}
 
+	// Mark-and-sweep: delete songs whose files no longer exist on disk.
+	var gone []string
+	for path := range knownFiles {
+		if !seenPaths[path] {
+			gone = append(gone, path)
+		}
+	}
+	if len(gone) > 0 {
+		if err := s.deleteSongs(conn, gone); err != nil {
+			return fmt.Errorf("deleting removed songs: %w", err)
+		}
+		s.log.Info("removed deleted tracks", "count", len(gone))
+	}
+
 	// Assign folder art to albums and clear stale cover_art paths.
 	if err := s.resolveAlbumArt(conn, folderArt); err != nil {
 		s.log.Warn("album art resolution", "err", err)
@@ -202,6 +249,11 @@ func (s *Scanner) Run() error {
 	// Update album aggregates.
 	if err := s.updateAlbumStats(conn); err != nil {
 		return fmt.Errorf("updating album stats: %w", err)
+	}
+
+	// Clean up orphaned albums and artists after stats update.
+	if err := s.deleteOrphans(conn); err != nil {
+		return fmt.Errorf("deleting orphans: %w", err)
 	}
 
 	// Rebuild FTS5 index.
@@ -218,6 +270,7 @@ type trackInfo struct {
 	ext         string // without dot
 	contentType string
 	size        int64
+	fileMtime   int64 // stat ModTime().UnixNano()
 	title       string
 	artist      string
 	album       string
@@ -251,6 +304,7 @@ func readTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo,
 		ext:         strings.TrimPrefix(ext, "."),
 		contentType: contentType,
 		size:        stat.Size(),
+		fileMtime:   stat.ModTime().UnixNano(),
 	}
 
 	var audioOffset int64
@@ -387,18 +441,18 @@ func (s *Scanner) upsertSong(conn *sqlite.Conn, t trackInfo, artistID, albumID s
 	id := db.NewID()
 	return sqlitex.ExecuteTransient(conn, `
 		INSERT INTO song (id, album_id, artist_id, title, track, disc, year, genre,
-		                   duration, size, suffix, bitrate, content_type, path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   duration, size, suffix, bitrate, content_type, path, file_mtime)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			title=excluded.title, track=excluded.track, disc=excluded.disc,
 			year=excluded.year, genre=excluded.genre, duration=excluded.duration,
 			size=excluded.size, suffix=excluded.suffix, bitrate=excluded.bitrate,
 			content_type=excluded.content_type, artist_id=excluded.artist_id,
-			album_id=excluded.album_id
+			album_id=excluded.album_id, file_mtime=excluded.file_mtime
 	`, &sqlitex.ExecOptions{
 		Args: []any{
 			id, albumID, artistID, t.title, t.track, t.disc, t.year, t.genre,
-			t.duration, t.size, t.ext, t.bitrate, t.contentType, t.path,
+			t.duration, t.size, t.ext, t.bitrate, t.contentType, t.path, t.fileMtime,
 		},
 	})
 }
@@ -476,6 +530,93 @@ func (s *Scanner) resolveAlbumArt(conn *sqlite.Conn, folderArt map[string]string
 		s.log.Info("album art resolved", "assigned", assigned, "cleared_stale", cleared)
 	}
 	return nil
+}
+
+// deleteSongs removes songs (and related play_history, star, playlist_song rows)
+// for paths that no longer exist on disk. Batches in chunks of 500.
+func (s *Scanner) deleteSongs(conn *sqlite.Conn, paths []string) error {
+	const chunkSize = 500
+	for i := 0; i < len(paths); i += chunkSize {
+		end := i + chunkSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		chunk := paths[i:end]
+
+		endFn, err := sqlitex.ImmediateTransaction(conn)
+		if err != nil {
+			return err
+		}
+
+		// Build placeholder list.
+		placeholders := strings.Repeat("?,", len(chunk))
+		placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+		args := make([]any, len(chunk))
+		for j, p := range chunk {
+			args[j] = p
+		}
+
+		// Collect song IDs for the paths being deleted.
+		var songIDs []string
+		err = sqlitex.ExecuteTransient(conn,
+			`SELECT id FROM song WHERE path IN (`+placeholders+`)`,
+			&sqlitex.ExecOptions{
+				Args: args,
+				ResultFunc: func(stmt *sqlite.Stmt) error {
+					songIDs = append(songIDs, stmt.ColumnText(0))
+					return nil
+				},
+			})
+		if err != nil {
+			endFn(&err)
+			return err
+		}
+
+		if len(songIDs) > 0 {
+			idPlaceholders := strings.Repeat("?,", len(songIDs))
+			idPlaceholders = idPlaceholders[:len(idPlaceholders)-1]
+			idArgs := make([]any, len(songIDs))
+			for j, id := range songIDs {
+				idArgs[j] = id
+			}
+
+			for _, q := range []string{
+				`DELETE FROM play_history WHERE song_id IN (` + idPlaceholders + `)`,
+				`DELETE FROM star WHERE item_id IN (` + idPlaceholders + `) AND item_type = 'song'`,
+				`DELETE FROM playlist_song WHERE song_id IN (` + idPlaceholders + `)`,
+			} {
+				if err = sqlitex.ExecuteTransient(conn, q, &sqlitex.ExecOptions{Args: idArgs}); err != nil {
+					endFn(&err)
+					return err
+				}
+			}
+		}
+
+		// Delete the songs themselves by path.
+		err = sqlitex.ExecuteTransient(conn,
+			`DELETE FROM song WHERE path IN (`+placeholders+`)`,
+			&sqlitex.ExecOptions{Args: args})
+		if err != nil {
+			endFn(&err)
+			return err
+		}
+
+		endFn(&err)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteOrphans removes albums with no songs and artists with no albums.
+func (s *Scanner) deleteOrphans(conn *sqlite.Conn) error {
+	if err := sqlitex.ExecuteTransient(conn,
+		`DELETE FROM album WHERE id NOT IN (SELECT DISTINCT album_id FROM song)`, nil); err != nil {
+		return err
+	}
+	return sqlitex.ExecuteTransient(conn,
+		`DELETE FROM artist WHERE id NOT IN (SELECT DISTINCT artist_id FROM album)`, nil)
 }
 
 func (s *Scanner) rebuildFTS(conn *sqlite.Conn) error {
