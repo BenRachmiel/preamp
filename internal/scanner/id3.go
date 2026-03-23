@@ -20,11 +20,11 @@ type id3Tags struct {
 	tagSize int64 // total tag size including header (offset where audio begins)
 }
 
-// readID3v2 reads only text frames from an ID3v2 tag, seeking past binary
-// frames (APIC, etc.) without reading their data from disk at all.
-// Returns false if the data does not have a valid ID3v2 header.
+// readID3v2 reads only text frames from an ID3v2 tag using a bulk read to
+// minimize syscalls. Reads min(tagSize, 64KB) into a pooled buffer, then
+// parses all frames from memory. Returns false if no valid ID3v2 header.
 func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
-	// Read 10-byte ID3v2 header.
+	// Read 10-byte ID3v2 header (1 syscall).
 	var hdr [10]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return id3Tags{}, false
@@ -41,24 +41,40 @@ func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 	// Syncsafe integer: 4 × 7 bits.
 	rawTagSize := int64(hdr[6])<<21 | int64(hdr[7])<<14 | int64(hdr[8])<<7 | int64(hdr[9])
 
-	var tags id3Tags
+	// Bulk-read min(rawTagSize, 64KB) into a pooled buffer (1 syscall).
+	readSize := rawTagSize
+	if readSize > maxSyncSearchBytes {
+		readSize = maxSyncSearchBytes
+	}
+
+	buf := chunkPool.Get().([]byte)
+	defer chunkPool.Put(buf)
+
+	n, _ := io.ReadAtLeast(r, buf[:readSize], int(min(readSize, 10)))
+	if n == 0 {
+		return id3Tags{tagSize: 10 + rawTagSize}, true
+	}
+
+	tags := parseID3v2Frames(buf[:n], major, rawTagSize, hdr[5])
 	tags.tagSize = 10 + rawTagSize
-	tagEnd := tags.tagSize
+	return tags, true
+}
+
+// parseID3v2Frames parses ID3v2 frames from buf (tag body after the 10-byte
+// header). rawTagSize is the declared tag size from the header; flags is byte 5
+// of the header. Operates entirely in memory — no I/O.
+func parseID3v2Frames(buf []byte, major byte, rawTagSize int64, flags byte) id3Tags {
+	var tags id3Tags
+	pos := 0
 
 	// Skip extended header if present (flag bit 6).
-	if hdr[5]&0x40 != 0 && major >= 3 {
-		var extHdr [4]byte
-		if _, err := io.ReadFull(r, extHdr[:]); err != nil {
-			return tags, true
-		}
-		extSize := int64(binary.BigEndian.Uint32(extHdr[:]))
+	if flags&0x40 != 0 && major >= 3 && len(buf) >= 4 {
+		extSize := int64(binary.BigEndian.Uint32(buf[:4]))
 		if major == 4 {
-			extSize = int64(extHdr[0])<<21 | int64(extHdr[1])<<14 | int64(extHdr[2])<<7 | int64(extHdr[3])
+			extSize = int64(buf[0])<<21 | int64(buf[1])<<14 | int64(buf[2])<<7 | int64(buf[3])
 			extSize -= 4
 		}
-		if _, err := r.Seek(extSize, io.SeekCurrent); err != nil {
-			return tags, true
-		}
+		pos = 4 + int(extSize)
 	}
 
 	// Frame header sizes differ between v2.2 (6 bytes) and v2.3/v2.4 (10 bytes).
@@ -72,17 +88,16 @@ func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 	}
 	frameHdrLen := frameIDLen + frameSizeLen + frameFlagsLen
 
-	hdrBuf := make([]byte, frameHdrLen)
-
 	for {
-		pos, _ := r.Seek(0, io.SeekCurrent)
-		if pos >= tagEnd {
+		if int64(pos) >= rawTagSize {
 			break
+		}
+		if pos+frameHdrLen > len(buf) {
+			break // hit read cap
 		}
 
-		if _, err := io.ReadFull(r, hdrBuf); err != nil {
-			break
-		}
+		hdrBuf := buf[pos : pos+frameHdrLen]
+		pos += frameHdrLen
 
 		// Padding (all zeros) means end of frames.
 		if hdrBuf[0] == 0 {
@@ -104,23 +119,25 @@ func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 			break
 		}
 
-		// Only read text frames we care about.
+		end := pos + int(frameSize)
+
+		// Only decode text frames we care about.
 		if wantTextFrame(frameID, major) && frameSize < 4096 {
-			data := make([]byte, frameSize)
-			if _, err := io.ReadFull(r, data); err != nil {
-				break
+			if end > len(buf) {
+				break // frame extends past read cap
 			}
-			val := decodeTextFrame(data)
+			val := decodeTextFrame(buf[pos:end])
 			applyTag(&tags, frameID, val, major)
-		} else {
-			// Seek past unwanted frames (APIC, COMM, etc.) — zero disk I/O.
-			if _, err := r.Seek(frameSize, io.SeekCurrent); err != nil {
-				break
-			}
 		}
+
+		// Advance past frame data (or skip unwanted frames like APIC).
+		if end > len(buf) {
+			break // can't advance past read cap
+		}
+		pos = end
 	}
 
-	return tags, true
+	return tags
 }
 
 // wantTextFrame returns true for frame IDs we need to extract.
