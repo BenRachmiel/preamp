@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"bufio"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -203,12 +202,10 @@ func readTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo,
 
 	var audioOffset int64
 
-	// Use lightweight ID3v2 reader for MP3 — skips APIC frames entirely
-	// instead of reading multi-MB embedded art into memory. Buffered to
-	// minimize syscalls.
+	// Use lightweight ID3v2 reader for MP3 — seeks past APIC frames
+	// without reading their data from disk at all.
 	if ext == ".mp3" {
-		br := bufio.NewReaderSize(f, 8192)
-		if tags, ok := readID3v2(br); ok {
+		if tags, ok := readID3v2(f); ok {
 			info.title = tags.title
 			info.artist = tags.artist
 			info.album = tags.album

@@ -26,10 +26,12 @@ func setupBenchScanner(b *testing.B, musicDir string) (*Scanner, *db.DB) {
 	return sc, database
 }
 
+// BenchmarkScan benchmarks scanning test-music-lib/.
+// Generate it with: just gen-test-lib
 func BenchmarkScan(b *testing.B) {
 	musicDir := filepath.Join("..", "..", "test-music-lib")
 	if _, err := os.Stat(musicDir); err != nil {
-		b.Skip("test-music-lib not found")
+		b.Skip("test-music-lib not found — run 'just gen-test-lib' to generate")
 	}
 
 	b.ReportAllocs()

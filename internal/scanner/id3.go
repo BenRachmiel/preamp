@@ -20,11 +20,10 @@ type id3Tags struct {
 	tagSize int64 // total tag size including header (offset where audio begins)
 }
 
-// readID3v2 reads only text frames from an ID3v2 tag, skipping binary
-// frames (APIC, etc.) without allocating memory for them. Works with any
-// io.Reader (including bufio.Reader) — no seeking required.
+// readID3v2 reads only text frames from an ID3v2 tag, seeking past binary
+// frames (APIC, etc.) without reading their data from disk at all.
 // Returns false if the data does not have a valid ID3v2 header.
-func readID3v2(r io.Reader) (id3Tags, bool) {
+func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 	// Read 10-byte ID3v2 header.
 	var hdr [10]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -44,22 +43,20 @@ func readID3v2(r io.Reader) (id3Tags, bool) {
 
 	var tags id3Tags
 	tags.tagSize = 10 + rawTagSize
-
-	// Wrap in a LimitedReader so we stop at the tag boundary.
-	lr := &io.LimitedReader{R: r, N: rawTagSize}
+	tagEnd := tags.tagSize
 
 	// Skip extended header if present (flag bit 6).
 	if hdr[5]&0x40 != 0 && major >= 3 {
 		var extHdr [4]byte
-		if _, err := io.ReadFull(lr, extHdr[:]); err != nil {
-			return tags, true // partial is fine, we got tagSize
+		if _, err := io.ReadFull(r, extHdr[:]); err != nil {
+			return tags, true
 		}
 		extSize := int64(binary.BigEndian.Uint32(extHdr[:]))
 		if major == 4 {
 			extSize = int64(extHdr[0])<<21 | int64(extHdr[1])<<14 | int64(extHdr[2])<<7 | int64(extHdr[3])
 			extSize -= 4
 		}
-		if _, err := io.CopyN(io.Discard, lr, extSize); err != nil {
+		if _, err := r.Seek(extSize, io.SeekCurrent); err != nil {
 			return tags, true
 		}
 	}
@@ -77,8 +74,13 @@ func readID3v2(r io.Reader) (id3Tags, bool) {
 
 	hdrBuf := make([]byte, frameHdrLen)
 
-	for lr.N > 0 {
-		if _, err := io.ReadFull(lr, hdrBuf); err != nil {
+	for {
+		pos, _ := r.Seek(0, io.SeekCurrent)
+		if pos >= tagEnd {
+			break
+		}
+
+		if _, err := io.ReadFull(r, hdrBuf); err != nil {
 			break
 		}
 
@@ -98,21 +100,21 @@ func readID3v2(r io.Reader) (id3Tags, bool) {
 			frameSize = int64(binary.BigEndian.Uint32(hdrBuf[frameIDLen : frameIDLen+4]))
 		}
 
-		if frameSize <= 0 || frameSize > lr.N {
+		if frameSize <= 0 {
 			break
 		}
 
 		// Only read text frames we care about.
 		if wantTextFrame(frameID, major) && frameSize < 4096 {
 			data := make([]byte, frameSize)
-			if _, err := io.ReadFull(lr, data); err != nil {
+			if _, err := io.ReadFull(r, data); err != nil {
 				break
 			}
 			val := decodeTextFrame(data)
 			applyTag(&tags, frameID, val, major)
 		} else {
-			// Skip unwanted frames (APIC, COMM, etc.) without reading into memory.
-			if _, err := io.CopyN(io.Discard, lr, frameSize); err != nil {
+			// Seek past unwanted frames (APIC, COMM, etc.) — zero disk I/O.
+			if _, err := r.Seek(frameSize, io.SeekCurrent); err != nil {
 				break
 			}
 		}
@@ -185,7 +187,6 @@ func decodeUTF16(data []byte) string {
 	if len(data) < 2 {
 		return ""
 	}
-	// Detect BOM.
 	bigEndian := true
 	if data[0] == 0xFF && data[1] == 0xFE {
 		bigEndian = false

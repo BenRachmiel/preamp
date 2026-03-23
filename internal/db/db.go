@@ -2,9 +2,10 @@ package db
 
 import (
 	"context"
-	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math/rand/v2"
 
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
@@ -110,11 +111,12 @@ func (db *DB) Close() {
 	}
 }
 
-// NewID generates a random 16-byte hex ID.
+// NewID generates a random 16-byte hex ID using a fast PRNG.
+// These IDs are internal primary keys, not security tokens — crypto/rand
+// is unnecessary and its per-call syscall overhead is significant during scans.
 func NewID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return hex.EncodeToString(b)
+	var b [16]byte
+	binary.LittleEndian.PutUint64(b[:8], rand.Uint64())
+	binary.LittleEndian.PutUint64(b[8:], rand.Uint64())
+	return hex.EncodeToString(b[:])
 }

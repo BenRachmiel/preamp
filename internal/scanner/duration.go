@@ -17,6 +17,11 @@ import (
 // valid MPEG frame sync word before giving up.
 const maxSyncSearchBytes = 65536
 
+// chunkPool reuses the 64KB+ buffers allocated for MP3 sync/Xing parsing.
+var chunkPool = sync.Pool{
+	New: func() any { return make([]byte, maxSyncSearchBytes+256) },
+}
+
 // parseDuration returns accurate duration (seconds) and bitrate (kbps) for an audio file.
 // audioOffset is the byte offset where audio begins (from ID3 tag parsing); 0 if unknown.
 func parseDuration(f *os.File, fileSize, audioOffset int64, ext string, log *slog.Logger) (durationSecs, bitrateKbps int) {
@@ -75,8 +80,9 @@ func parseMP3Duration(f *os.File, fileSize, audioOffset int64) (durationSecs, bi
 	if chunkSize <= 4 {
 		return 0, 0, io.ErrUnexpectedEOF
 	}
-	chunk := make([]byte, chunkSize)
-	n, err := io.ReadAtLeast(f, chunk, 4)
+	chunk := chunkPool.Get().([]byte)
+	defer chunkPool.Put(chunk)
+	n, err := io.ReadAtLeast(f, chunk[:chunkSize], 4)
 	if err != nil {
 		return 0, 0, err
 	}
