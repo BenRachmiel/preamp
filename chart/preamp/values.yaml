@@ -87,6 +87,11 @@ resources:
     cpu: 500m
     memory: 512Mi
 
+# -- Go runtime tuning. Go 1.25+ caps GOMAXPROCS to the cgroup CPU limit
+# (floor of 500m = 1 thread), which serializes I/O-bound goroutines.
+# Override to allow parallel NFS reads during scanning.
+goMaxProcs: 4
+
 probes:
   liveness:
     path: /rest/ping

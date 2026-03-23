@@ -28,6 +28,10 @@ spec:
               containerPort: 4534
               protocol: TCP
           env:
+            {{- if .Values.goMaxProcs }}
+            - name: GOMAXPROCS
+              value: {{ .Values.goMaxProcs | quote }}
+            {{- end }}
             - name: PREAMP_MUSIC_DIR
               value: {{ .Values.config.musicDir | quote }}
             - name: PREAMP_DATA_DIR
