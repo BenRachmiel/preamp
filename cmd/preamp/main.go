@@ -55,7 +55,7 @@ func main() {
 
 	srv := api.NewServer(cfg, database, log)
 
-	sc := scanner.New(database, cfg.MusicDir, cfg.CoverArtDir, log)
+	sc := scanner.New(database, cfg.MusicDir, log)
 	srv.SetScanner(sc)
 
 	// Management UI.

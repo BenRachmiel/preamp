@@ -70,7 +70,7 @@ export function LibraryPage() {
           <button
             type="button"
             disabled={scan.scanning}
-            onClick={() => startScan().then(() => fetchStats())}
+            onClick={() => startScan()}
             class="btn btn-primary"
           >
             {scan.scanning ? "Scanning..." : "Rescan Library"}

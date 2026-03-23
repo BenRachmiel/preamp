@@ -30,7 +30,7 @@ func TestStartScanNoScanner(t *testing.T) {
 func TestStartScanHappyPath(t *testing.T) {
 	srv := testServer(t)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	sc := scanner.New(srv.db, srv.cfg.MusicDir, srv.cfg.CoverArtDir, log)
+	sc := scanner.New(srv.db, srv.cfg.MusicDir, log)
 	srv.SetScanner(sc)
 
 	resp := getJSON(t, srv, "/rest/startScan?")
@@ -47,7 +47,7 @@ func TestStartScanHappyPath(t *testing.T) {
 func TestGetScanStatusWithScanner(t *testing.T) {
 	srv := testServer(t)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	sc := scanner.New(srv.db, srv.cfg.MusicDir, srv.cfg.CoverArtDir, log)
+	sc := scanner.New(srv.db, srv.cfg.MusicDir, log)
 	srv.SetScanner(sc)
 
 	resp := getJSON(t, srv, "/rest/getScanStatus?")

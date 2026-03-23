@@ -2,7 +2,6 @@ package scanner
 
 import (
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -29,24 +28,22 @@ var supportedExts = map[string]string{
 }
 
 type Scanner struct {
-	db          *db.DB
-	musicDir    string
-	coverArtDir string
-	log         *slog.Logger
-	scanning    atomic.Bool
-	count       atomic.Int64
+	db       *db.DB
+	musicDir string
+	log      *slog.Logger
+	scanning atomic.Bool
+	count    atomic.Int64
 }
 
-func New(database *db.DB, musicDir, coverArtDir string, log *slog.Logger) *Scanner {
+func New(database *db.DB, musicDir string, log *slog.Logger) *Scanner {
 	// Resolve to real path for canonical base (symlink-safe).
 	if resolved, err := filepath.EvalSymlinks(musicDir); err == nil {
 		musicDir = resolved
 	}
 	return &Scanner{
-		db:          database,
-		musicDir:    musicDir,
-		coverArtDir: coverArtDir,
-		log:         log,
+		db:       database,
+		musicDir: musicDir,
+		log:      log,
 	}
 }
 
@@ -60,7 +57,7 @@ func (s *Scanner) Count() int {
 
 // Run performs a full scan of the music directory. Tracks are processed in
 // streaming batches to bound peak memory to O(batchSize) instead of
-// O(totalTracks) — critical when tracks carry embedded cover art.
+// O(totalTracks).
 func (s *Scanner) Run() error {
 	if !s.scanning.CompareAndSwap(false, true) {
 		return fmt.Errorf("scan already in progress")
@@ -79,6 +76,9 @@ func (s *Scanner) Run() error {
 	const batchSize = 1000
 	batch := make([]trackInfo, 0, batchSize)
 	total := 0
+
+	// Collect folder art discovered during walk: dir → art file path.
+	folderArt := make(map[string]string)
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -103,6 +103,19 @@ func (s *Scanner) Run() error {
 		}
 		if d.Type()&os.ModeSymlink != 0 {
 			return nil
+		}
+
+		name := strings.ToLower(d.Name())
+		dir := filepath.Dir(path)
+
+		// Check if this file is folder art before checking audio extensions.
+		if _, seen := folderArt[dir]; !seen {
+			for _, artName := range folderArtNames {
+				if name == artName {
+					folderArt[dir] = path
+					return nil
+				}
+			}
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
@@ -140,8 +153,8 @@ func (s *Scanner) Run() error {
 		return err
 	}
 
-	// Resolve cover art for albums: try embedded art first, then folder art.
-	if err := s.resolveAlbumArt(conn); err != nil {
+	// Assign folder art to albums and clear stale cover_art paths.
+	if err := s.resolveAlbumArt(conn, folderArt); err != nil {
 		s.log.Warn("album art resolution", "err", err)
 	}
 
@@ -350,9 +363,12 @@ func (s *Scanner) upsertSong(conn *sqlite.Conn, t trackInfo, artistID, albumID s
 
 func (s *Scanner) updateAlbumStats(conn *sqlite.Conn) error {
 	return sqlitex.ExecuteTransient(conn, `
-		UPDATE album SET
-			song_count = (SELECT COUNT(*) FROM song WHERE song.album_id = album.id),
-			duration = (SELECT COALESCE(SUM(duration), 0) FROM song WHERE song.album_id = album.id)
+		UPDATE album SET song_count = agg.cnt, duration = agg.dur
+		FROM (
+			SELECT album_id, COUNT(*) AS cnt, COALESCE(SUM(duration), 0) AS dur
+			FROM song GROUP BY album_id
+		) agg
+		WHERE album.id = agg.album_id
 	`, nil)
 }
 
@@ -363,27 +379,26 @@ var folderArtNames = []string{
 	"front.jpg", "front.png",
 }
 
-// resolveAlbumArt finds cover art for albums that don't have any yet.
-// For each album it tries embedded art from a sample track first, then falls
-// back to common folder art filenames. Only one track is opened at a time,
-// so peak memory is bounded to a single image regardless of library size.
-func (s *Scanner) resolveAlbumArt(conn *sqlite.Conn) error {
+// resolveAlbumArt assigns folder art to albums missing cover art and clears
+// stale cover_art paths that no longer exist on disk.
+func (s *Scanner) resolveAlbumArt(conn *sqlite.Conn, folderArt map[string]string) error {
 	type albumInfo struct {
 		id       string
-		songPath string
+		coverArt string // existing cover_art value (may be empty)
+		songDir  string // directory of a sample song
 	}
 	var albums []albumInfo
 
 	err := sqlitex.ExecuteTransient(conn, `
-		SELECT a.id, MIN(s.path) FROM album a
+		SELECT a.id, COALESCE(a.cover_art, ''), MIN(s.path) FROM album a
 		JOIN song s ON s.album_id = a.id
-		WHERE a.cover_art IS NULL OR a.cover_art = ''
 		GROUP BY a.id
 	`, &sqlitex.ExecOptions{
 		ResultFunc: func(stmt *sqlite.Stmt) error {
 			albums = append(albums, albumInfo{
 				id:       stmt.ColumnText(0),
-				songPath: stmt.ColumnText(1),
+				coverArt: stmt.ColumnText(1),
+				songDir:  filepath.Dir(stmt.ColumnText(2)),
 			})
 			return nil
 		},
@@ -392,107 +407,33 @@ func (s *Scanner) resolveAlbumArt(conn *sqlite.Conn) error {
 		return err
 	}
 
-	found := 0
+	assigned, cleared := 0, 0
 	for _, album := range albums {
-		// Try embedded art first.
-		if s.extractEmbeddedArt(conn, album.id, album.songPath) {
-			found++
-			continue
+		if album.coverArt != "" {
+			// Verify existing cover art still exists.
+			if _, err := os.Stat(album.coverArt); err != nil {
+				_ = sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = NULL WHERE id = ?`, &sqlitex.ExecOptions{
+					Args: []any{album.id},
+				})
+				cleared++
+				album.coverArt = ""
+			}
 		}
 
-		// Fall back to folder art.
-		dir := filepath.Dir(album.songPath)
-		if s.copyFolderArt(conn, album.id, dir) {
-			found++
+		if album.coverArt == "" {
+			if artPath, ok := folderArt[album.songDir]; ok {
+				_ = sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = ? WHERE id = ?`, &sqlitex.ExecOptions{
+					Args: []any{artPath, album.id},
+				})
+				assigned++
+			}
 		}
 	}
 
-	if found > 0 {
-		s.log.Info("resolved album art", "albums", found)
+	if assigned > 0 || cleared > 0 {
+		s.log.Info("album art resolved", "assigned", assigned, "cleared_stale", cleared)
 	}
 	return nil
-}
-
-// extractEmbeddedArt opens a single track, reads its embedded picture, and
-// writes it to the cover art cache. Returns true if art was found and saved.
-func (s *Scanner) extractEmbeddedArt(conn *sqlite.Conn, albumID, songPath string) bool {
-	f, err := os.Open(songPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	meta, err := tag.ReadFrom(f)
-	if err != nil {
-		return false
-	}
-
-	pic := meta.Picture()
-	if pic == nil || len(pic.Data) == 0 {
-		return false
-	}
-
-	ext := "jpg"
-	if pic.MIMEType == "image/png" {
-		ext = "png"
-	}
-
-	coverPath := filepath.Join(s.coverArtDir, albumID+"."+ext)
-	out, err := os.OpenFile(coverPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return false
-	}
-	_, writeErr := out.Write(pic.Data)
-	out.Close()
-	if writeErr != nil {
-		os.Remove(coverPath)
-		s.log.Warn("writing embedded art", "album_id", albumID, "err", writeErr)
-		return false
-	}
-
-	_ = sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = ? WHERE id = ?`, &sqlitex.ExecOptions{
-		Args: []any{coverPath, albumID},
-	})
-	return true
-}
-
-// copyFolderArt looks for common cover art files in the given directory and
-// copies the first match to the cover art cache. Returns true if art was found.
-func (s *Scanner) copyFolderArt(conn *sqlite.Conn, albumID, dir string) bool {
-	for _, name := range folderArtNames {
-		artPath := filepath.Join(dir, name)
-		if _, err := os.Stat(artPath); err != nil {
-			continue
-		}
-
-		dst := filepath.Join(s.coverArtDir, albumID+".jpg")
-		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err != nil {
-			return false
-		}
-
-		src, err := os.Open(artPath)
-		if err != nil {
-			out.Close()
-			os.Remove(dst)
-			s.log.Warn("opening folder art", "path", artPath, "err", err)
-			return false
-		}
-		_, copyErr := io.Copy(out, src)
-		src.Close()
-		out.Close()
-		if copyErr != nil {
-			os.Remove(dst)
-			s.log.Warn("copying folder art", "album_id", albumID, "err", copyErr)
-			return false
-		}
-
-		_ = sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = ? WHERE id = ?`, &sqlitex.ExecOptions{
-			Args: []any{dst, albumID},
-		})
-		return true
-	}
-	return false
 }
 
 func (s *Scanner) rebuildFTS(conn *sqlite.Conn) error {

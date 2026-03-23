@@ -16,8 +16,6 @@ func setupScanner(t *testing.T, musicDir string) (*Scanner, *db.DB) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	coverDir := filepath.Join(tmpDir, "covers")
-	os.MkdirAll(coverDir, 0o755)
 
 	database, err := db.Open(dbPath)
 	if err != nil {
@@ -26,7 +24,7 @@ func setupScanner(t *testing.T, musicDir string) (*Scanner, *db.DB) {
 	t.Cleanup(func() { database.Close() })
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	sc := New(database, musicDir, coverDir, log)
+	sc := New(database, musicDir, log)
 	return sc, database
 }
 
@@ -258,6 +256,82 @@ func TestSafeReadTrackRecoversPanic(t *testing.T) {
 	}
 	if info.title != "test" {
 		t.Errorf("title = %q, want %q", info.title, "test")
+	}
+}
+
+func TestScanFolderArt(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a dummy audio file so the scanner has something to index.
+	os.WriteFile(filepath.Join(tmpDir, "track.mp3"), []byte("not a real mp3"), 0o644)
+
+	// Create a cover art file in the same directory.
+	os.WriteFile(filepath.Join(tmpDir, "cover.jpg"), []byte("fake jpeg"), 0o644)
+
+	sc, database := setupScanner(t, tmpDir)
+	if err := sc.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	conn, put, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer put()
+
+	var coverArt string
+	sqlitex.ExecuteTransient(conn, `SELECT cover_art FROM album LIMIT 1`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			coverArt = stmt.ColumnText(0)
+			return nil
+		},
+	})
+
+	want := filepath.Join(tmpDir, "cover.jpg")
+	if coverArt != want {
+		t.Errorf("cover_art = %q, want %q", coverArt, want)
+	}
+}
+
+func TestScanClearsStaleCoverArt(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.WriteFile(filepath.Join(tmpDir, "track.mp3"), []byte("not a real mp3"), 0o644)
+
+	sc, database := setupScanner(t, tmpDir)
+	if err := sc.Run(); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Manually set cover_art to a nonexistent path.
+	conn, put, err := database.WriteConn()
+	if err != nil {
+		t.Fatalf("WriteConn: %v", err)
+	}
+	sqlitex.ExecuteTransient(conn, `UPDATE album SET cover_art = '/nonexistent/cover.jpg'`, nil)
+	put()
+
+	// Rescan should clear the stale path.
+	if err := sc.Run(); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	rconn, rput, err := database.ReadConn()
+	if err != nil {
+		t.Fatalf("ReadConn: %v", err)
+	}
+	defer rput()
+
+	var coverArt string
+	sqlitex.ExecuteTransient(rconn, `SELECT COALESCE(cover_art, '') FROM album LIMIT 1`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			coverArt = stmt.ColumnText(0)
+			return nil
+		},
+	})
+
+	if coverArt != "" {
+		t.Errorf("cover_art = %q, want empty (stale path should be cleared)", coverArt)
 	}
 }
 

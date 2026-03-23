@@ -14,8 +14,6 @@ func setupBenchScanner(b *testing.B, musicDir string) (*Scanner, *db.DB) {
 	b.Helper()
 	tmpDir := b.TempDir()
 	dbPath := filepath.Join(tmpDir, "bench.db")
-	coverDir := filepath.Join(tmpDir, "covers")
-	os.MkdirAll(coverDir, 0o755)
 
 	database, err := db.Open(dbPath)
 	if err != nil {
@@ -24,7 +22,7 @@ func setupBenchScanner(b *testing.B, musicDir string) (*Scanner, *db.DB) {
 	b.Cleanup(func() { database.Close() })
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	sc := New(database, musicDir, coverDir, log)
+	sc := New(database, musicDir, log)
 	return sc, database
 }
 

@@ -308,7 +308,7 @@ func TestAdminGetScanStatusNoScanner(t *testing.T) {
 
 func TestAdminGetScanStatusWithScanner(t *testing.T) {
 	srv := testServer(t)
-	sc := scanner.New(srv.db, srv.cfg.MusicDir, srv.cfg.CoverArtDir, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	sc := scanner.New(srv.db, srv.cfg.MusicDir, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	srv.SetScanner(sc)
 
 	w := adminGet(t, srv, "/admin/scan", "alice")
@@ -332,7 +332,7 @@ func TestAdminStartScanNoScanner(t *testing.T) {
 
 func TestAdminStartScanWithScanner(t *testing.T) {
 	srv := testServer(t)
-	sc := scanner.New(srv.db, srv.cfg.MusicDir, srv.cfg.CoverArtDir, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	sc := scanner.New(srv.db, srv.cfg.MusicDir, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	srv.SetScanner(sc)
 
 	w := adminPost(t, srv, "/admin/scan", "alice", nil)
