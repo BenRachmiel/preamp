@@ -58,8 +58,12 @@ func (s *Scanner) Count() int {
 }
 
 // scanWorkers is the number of concurrent file-reading goroutines.
-// Kept small to avoid overwhelming NFS but enough to hide per-file latency.
-var scanWorkers = min(4, runtime.NumCPU())
+// Sized for I/O latency hiding, not CPU: workers spend most of their time
+// blocked on NFS syscalls, so we need enough concurrency to keep the pipe
+// full regardless of how little CPU the container has.
+// Uses 2× GOMAXPROCS (which is cgroup-aware in Go 1.25+) as a baseline,
+// clamped to [4, 16].
+var scanWorkers = max(4, min(16, 2*runtime.GOMAXPROCS(0)))
 
 // trackJob carries a discovered audio file from the walker to a parse worker.
 type trackJob struct {

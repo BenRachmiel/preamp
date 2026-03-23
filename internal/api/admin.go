@@ -282,6 +282,145 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+type issueSpec struct {
+	songLevel  bool
+	condition  string
+}
+
+var issueTypes = map[string]issueSpec{
+	"songs_no_genre":        {songLevel: true, condition: "s.genre IS NULL OR s.genre = ''"},
+	"songs_no_year":         {songLevel: true, condition: "s.year IS NULL OR s.year = 0"},
+	"songs_unknown_artist":  {songLevel: true, condition: "ar.name = 'Unknown Artist'"},
+	"songs_zero_duration":   {songLevel: true, condition: "s.duration = 0"},
+	"albums_missing_art":    {songLevel: false, condition: "al.cover_art IS NULL OR al.cover_art = ''"},
+	"albums_no_year":        {songLevel: false, condition: "al.year IS NULL OR al.year = 0"},
+	"albums_no_genre":       {songLevel: false, condition: "al.genre IS NULL OR al.genre = ''"},
+}
+
+func (s *Server) handleAdminIssues(w http.ResponseWriter, r *http.Request) {
+	issueType := r.URL.Query().Get("type")
+	spec, ok := issueTypes[issueType]
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown issue type"})
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	conn, put, err := s.db.ReadConn()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+	defer put()
+
+	// Count total.
+	var total int
+	var countQuery string
+	if spec.songLevel {
+		countQuery = "SELECT COUNT(*) FROM song s JOIN artist ar ON ar.id = s.artist_id WHERE " + spec.condition
+	} else {
+		countQuery = "SELECT COUNT(*) FROM album al JOIN artist ar ON ar.id = al.artist_id WHERE " + spec.condition
+	}
+	err = sqlitex.ExecuteTransient(conn, countQuery, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			total = stmt.ColumnInt(0)
+			return nil
+		},
+	})
+	if err != nil {
+		s.log.Error("admin issues count", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+
+	prefix := s.cfg.MusicDir
+	if prefix != "" && prefix[len(prefix)-1] != '/' {
+		prefix += "/"
+	}
+
+	if spec.songLevel {
+		type songItem struct {
+			Title    string `json:"title"`
+			Artist   string `json:"artist"`
+			Album    string `json:"album"`
+			Path     string `json:"path"`
+			Genre    string `json:"genre"`
+			Year     int    `json:"year"`
+			Duration int    `json:"duration"`
+		}
+		items := []songItem{}
+		err = sqlitex.ExecuteTransient(conn,
+			"SELECT s.title, ar.name, al.name, s.path, s.genre, s.year, s.duration "+
+				"FROM song s JOIN album al ON al.id = s.album_id JOIN artist ar ON ar.id = s.artist_id "+
+				"WHERE "+spec.condition+" ORDER BY ar.name, al.name, s.track LIMIT ? OFFSET ?",
+			&sqlitex.ExecOptions{
+				Args: []any{limit, offset},
+				ResultFunc: func(stmt *sqlite.Stmt) error {
+					p := stmt.ColumnText(3)
+					if strings.HasPrefix(p, prefix) {
+						p = p[len(prefix):]
+					}
+					items = append(items, songItem{
+						Title:    stmt.ColumnText(0),
+						Artist:   stmt.ColumnText(1),
+						Album:    stmt.ColumnText(2),
+						Path:     p,
+						Genre:    stmt.ColumnText(4),
+						Year:     stmt.ColumnInt(5),
+						Duration: stmt.ColumnInt(6),
+					})
+					return nil
+				},
+			})
+		if err != nil {
+			s.log.Error("admin issues query", "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
+	} else {
+		type albumItem struct {
+			Name      string `json:"name"`
+			Artist    string `json:"artist"`
+			Year      int    `json:"year"`
+			Genre     string `json:"genre"`
+			SongCount int    `json:"song_count"`
+		}
+		items := []albumItem{}
+		err = sqlitex.ExecuteTransient(conn,
+			"SELECT al.name, ar.name, al.year, al.genre, al.song_count "+
+				"FROM album al JOIN artist ar ON ar.id = al.artist_id "+
+				"WHERE "+spec.condition+" ORDER BY ar.name, al.name LIMIT ? OFFSET ?",
+			&sqlitex.ExecOptions{
+				Args: []any{limit, offset},
+				ResultFunc: func(stmt *sqlite.Stmt) error {
+					items = append(items, albumItem{
+						Name:      stmt.ColumnText(0),
+						Artist:    stmt.ColumnText(1),
+						Year:      stmt.ColumnInt(2),
+						Genre:     stmt.ColumnText(3),
+						SongCount: stmt.ColumnInt(4),
+					})
+					return nil
+				},
+			})
+		if err != nil {
+			s.log.Error("admin issues query", "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
+	}
+}
+
 func (s *Server) handleAdminGetScanStatus(w http.ResponseWriter, r *http.Request) {
 	if s.scanner == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"scanning": false, "count": 0})

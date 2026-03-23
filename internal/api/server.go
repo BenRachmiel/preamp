@@ -192,6 +192,7 @@ func (s *Server) adminRoutes() {
 	s.adminMux.HandleFunc("POST /admin/credentials/{id}/renew", s.handleAdminRenewCredential)
 	s.adminMux.HandleFunc("DELETE /admin/credentials/{id}", s.handleAdminDeleteCredential)
 	s.adminMux.HandleFunc("GET /admin/stats", s.handleAdminStats)
+	s.adminMux.HandleFunc("GET /admin/issues", s.handleAdminIssues)
 	s.adminMux.HandleFunc("GET /admin/scan", s.handleAdminGetScanStatus)
 	s.adminMux.HandleFunc("POST /admin/scan", s.handleAdminStartScan)
 }
