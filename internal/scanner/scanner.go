@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"bufio"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -200,10 +201,14 @@ func readTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo,
 		size:        stat.Size(),
 	}
 
+	var audioOffset int64
+
 	// Use lightweight ID3v2 reader for MP3 — skips APIC frames entirely
-	// instead of reading multi-MB embedded art into memory.
+	// instead of reading multi-MB embedded art into memory. Buffered to
+	// minimize syscalls.
 	if ext == ".mp3" {
-		if tags, ok := readID3v2(f); ok {
+		br := bufio.NewReaderSize(f, 8192)
+		if tags, ok := readID3v2(br); ok {
 			info.title = tags.title
 			info.artist = tags.artist
 			info.album = tags.album
@@ -211,6 +216,7 @@ func readTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo,
 			info.year = tags.year
 			info.track = tags.track
 			info.disc = tags.disc
+			audioOffset = tags.tagSize
 		}
 	} else {
 		// Fallback to dhowden/tag for FLAC, OGG, M4A, etc.
@@ -239,11 +245,12 @@ func readTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo,
 		info.album = filepath.Base(filepath.Dir(path))
 	}
 
-	// Parse duration from the same open file handle (avoids a second open).
-	dur, br := parseDuration(f, stat.Size(), ext, log)
+	// Parse duration from the same open file handle.
+	// For MP3, audioOffset lets us skip re-reading the ID3 header.
+	dur, bitrate := parseDuration(f, stat.Size(), audioOffset, ext, log)
 	if dur > 0 {
 		info.duration = dur
-		info.bitrate = br
+		info.bitrate = bitrate
 	}
 
 	return info, nil

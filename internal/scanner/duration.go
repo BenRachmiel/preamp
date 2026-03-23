@@ -18,11 +18,11 @@ import (
 const maxSyncSearchBytes = 65536
 
 // parseDuration returns accurate duration (seconds) and bitrate (kbps) for an audio file.
-// It tries native parsing for MP3/FLAC using the already-open file, then falls back to ffprobe.
-func parseDuration(f *os.File, fileSize int64, ext string, log *slog.Logger) (durationSecs, bitrateKbps int) {
+// audioOffset is the byte offset where audio begins (from ID3 tag parsing); 0 if unknown.
+func parseDuration(f *os.File, fileSize, audioOffset int64, ext string, log *slog.Logger) (durationSecs, bitrateKbps int) {
 	switch ext {
 	case ".mp3":
-		d, br, err := parseMP3Duration(f, fileSize)
+		d, br, err := parseMP3Duration(f, fileSize, audioOffset)
 		if err == nil && d > 0 {
 			return d, br
 		}
@@ -51,116 +51,83 @@ var mp3BitrateTable = [16]int{
 var mp3SampleRateTable = [4]int{44100, 48000, 32000, 0}
 
 // parseMP3Duration parses MP3 duration from Xing/VBRI VBR header, or first-frame CBR estimation.
-// Expects the file seeked to position 0.
-func parseMP3Duration(f *os.File, fileSize int64) (durationSecs, bitrateKbps int, err error) {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return 0, 0, err
-	}
-
-	// Skip ID3v2 tag if present.
-	var header [10]byte
-	if _, err := io.ReadFull(f, header[:]); err != nil {
-		return 0, 0, err
-	}
-	offset := int64(0)
-	if header[0] == 'I' && header[1] == 'D' && header[2] == '3' {
-		// ID3v2 size is a syncsafe integer in bytes 6-9.
-		tagSize := int64(header[6])<<21 | int64(header[7])<<14 | int64(header[8])<<7 | int64(header[9])
-		offset = tagSize + 10
-	}
-
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return 0, 0, err
-	}
-
-	// Find first valid MPEG frame sync.
-	var syncBuf [4]byte
-	for i := 0; i < maxSyncSearchBytes; i++ {
-		if _, err := io.ReadFull(f, syncBuf[:1]); err != nil {
+// audioOffset is the byte offset where audio data begins (after the ID3 tag); pass 0 if unknown.
+func parseMP3Duration(f *os.File, fileSize, audioOffset int64) (durationSecs, bitrateKbps int, err error) {
+	if audioOffset <= 0 {
+		// Detect ID3v2 tag to find audio start.
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return 0, 0, err
 		}
-		if syncBuf[0] != 0xFF {
-			continue
-		}
-		if _, err := io.ReadFull(f, syncBuf[1:4]); err != nil {
+		var header [10]byte
+		if _, err := io.ReadFull(f, header[:]); err != nil {
 			return 0, 0, err
 		}
-		if syncBuf[1]&0xE0 != 0xE0 {
-			// Not a sync, back up 3 bytes.
-			if _, err := f.Seek(-3, io.SeekCurrent); err != nil {
-				return 0, 0, err
-			}
+		if header[0] == 'I' && header[1] == 'D' && header[2] == '3' {
+			audioOffset = int64(header[6])<<21 | int64(header[7])<<14 | int64(header[8])<<7 | int64(header[9]) + 10
+		}
+	}
+
+	// Read a chunk starting at the audio offset — one read instead of thousands of 1-byte reads.
+	if _, err := f.Seek(audioOffset, io.SeekStart); err != nil {
+		return 0, 0, err
+	}
+	chunkSize := min(int64(maxSyncSearchBytes+256), fileSize-audioOffset)
+	if chunkSize <= 4 {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	chunk := make([]byte, chunkSize)
+	n, err := io.ReadAtLeast(f, chunk, 4)
+	if err != nil {
+		return 0, 0, err
+	}
+	chunk = chunk[:n]
+
+	// Find first valid MPEG1 Layer III frame sync in the chunk.
+	for i := 0; i < len(chunk)-4; i++ {
+		if chunk[i] != 0xFF || chunk[i+1]&0xE0 != 0xE0 {
 			continue
 		}
 
-		// Parse frame header.
-		version := (syncBuf[1] >> 3) & 0x03     // 11=MPEG1, 10=MPEG2, 00=MPEG2.5
-		layer := (syncBuf[1] >> 1) & 0x03        // 01=Layer III
-		bitrateIdx := (syncBuf[2] >> 4) & 0x0F
-		sampleRateIdx := (syncBuf[2] >> 2) & 0x03
-		padding := (syncBuf[2] >> 1) & 0x01
+		version := (chunk[i+1] >> 3) & 0x03
+		layer := (chunk[i+1] >> 1) & 0x03
+		bitrateIdx := (chunk[i+2] >> 4) & 0x0F
+		sampleRateIdx := (chunk[i+2] >> 2) & 0x03
 
-		if version != 3 || layer != 1 { // only MPEG1 Layer III for now
-			if _, err := f.Seek(-3, io.SeekCurrent); err != nil {
-				return 0, 0, err
-			}
+		if version != 3 || layer != 1 {
 			continue
 		}
 		if bitrateIdx == 0 || bitrateIdx == 15 || sampleRateIdx == 3 {
-			if _, err := f.Seek(-3, io.SeekCurrent); err != nil {
-				return 0, 0, err
-			}
 			continue
 		}
 
 		bitrate := mp3BitrateTable[bitrateIdx]
 		sampleRate := mp3SampleRateTable[sampleRateIdx]
-		samplesPerFrame := 1152
-
-		_ = padding // padding only needed for frame-by-frame walking, not duration calc
+		frameStart := audioOffset + int64(i)
 
 		// Check for Xing/VBRI header inside this frame.
-		// Xing header is at offset 36 from frame start for MPEG1 stereo, 21 for mono.
-		// We're 4 bytes in, so seek to potential Xing offsets.
-		frameStart, _ := f.Seek(-4, io.SeekCurrent)
-
-		// Try Xing at side info offsets: 32 bytes for stereo, 17 for mono (after 4-byte header).
-		channelMode := (syncBuf[3] >> 6) & 0x03
-		xingOffset := int64(32 + 4) // stereo
-		if channelMode == 3 {       // mono
-			xingOffset = 17 + 4
+		channelMode := (chunk[i+3] >> 6) & 0x03
+		xingOff := 32 + 4 // stereo
+		if channelMode == 3 {
+			xingOff = 17 + 4 // mono
 		}
 
-		if _, err := f.Seek(frameStart+xingOffset, io.SeekStart); err != nil {
-			return 0, 0, err
-		}
-
-		var xingTag [4]byte
-		if _, err := io.ReadFull(f, xingTag[:]); err != nil {
-			return 0, 0, err
-		}
-
-		if string(xingTag[:]) == "Xing" || string(xingTag[:]) == "Info" {
-			var flags [4]byte
-			io.ReadFull(f, flags[:])
-			flagVal := binary.BigEndian.Uint32(flags[:])
-
-			if flagVal&0x01 != 0 { // frames field present
-				var framesBuf [4]byte
-				io.ReadFull(f, framesBuf[:])
-				totalFrames := int(binary.BigEndian.Uint32(framesBuf[:]))
-				totalSamples := totalFrames * samplesPerFrame
-				dur := totalSamples / sampleRate
-
-				avgBitrate := 0
-				if dur > 0 {
-					avgBitrate = int(fileSize*8/1000) / dur
+		if xingIdx := i + xingOff; xingIdx+12 <= len(chunk) {
+			tag := string(chunk[xingIdx : xingIdx+4])
+			if tag == "Xing" || tag == "Info" {
+				flags := binary.BigEndian.Uint32(chunk[xingIdx+4 : xingIdx+8])
+				if flags&0x01 != 0 { // frames field present
+					totalFrames := int(binary.BigEndian.Uint32(chunk[xingIdx+8 : xingIdx+12]))
+					dur := (totalFrames * 1152) / sampleRate
+					avgBitrate := 0
+					if dur > 0 {
+						avgBitrate = int(fileSize*8/1000) / dur
+					}
+					return dur, avgBitrate, nil
 				}
-				return dur, avgBitrate, nil
 			}
 		}
 
-		// No VBR header — CBR estimation from file size.
+		// No VBR header — CBR estimation.
 		audioBytesEst := fileSize - frameStart
 		dur := int(audioBytesEst * 8 / int64(bitrate) / 1000)
 		return dur, bitrate, nil

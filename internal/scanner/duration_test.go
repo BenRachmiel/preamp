@@ -33,7 +33,7 @@ func TestParseMP3DurationRealFiles(t *testing.T) {
 			t.Fatalf("Open %s: %v", path, err)
 		}
 		stat, _ := f.Stat()
-		dur, br := parseDuration(f, stat.Size(), ".mp3", log)
+		dur, br := parseDuration(f, stat.Size(), 0, ".mp3", log)
 		f.Close()
 		t.Logf("%s: duration=%ds bitrate=%dkbps", filepath.Base(path), dur, br)
 		if dur <= 0 {
@@ -116,7 +116,7 @@ func TestParseDurationFallbackReturnsZero(t *testing.T) {
 	}
 	defer f.Close()
 	stat, _ := f.Stat()
-	dur, br := parseDuration(f, stat.Size(), ".mp3", log)
+	dur, br := parseDuration(f, stat.Size(), 0, ".mp3", log)
 	// Should not crash. May return 0 if ffprobe is unavailable.
 	t.Logf("garbage file: dur=%d br=%d", dur, br)
 }

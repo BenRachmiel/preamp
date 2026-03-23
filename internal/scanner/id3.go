@@ -10,20 +10,21 @@ import (
 
 // id3Tags holds the text metadata extracted from an ID3v2 tag.
 type id3Tags struct {
-	title  string
-	artist string
-	album  string
-	genre  string
-	year   int
-	track  int
-	disc   int
+	title   string
+	artist  string
+	album   string
+	genre   string
+	year    int
+	track   int
+	disc    int
+	tagSize int64 // total tag size including header (offset where audio begins)
 }
 
-// readID3v2 reads only text frames from an ID3v2 tag, seeking past binary
-// frames (APIC, etc.) without allocating memory for them. This avoids the
-// multi-MB reads that dhowden/tag performs for embedded cover art.
-// Returns false if the file does not have a valid ID3v2 header.
-func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
+// readID3v2 reads only text frames from an ID3v2 tag, skipping binary
+// frames (APIC, etc.) without allocating memory for them. Works with any
+// io.Reader (including bufio.Reader) — no seeking required.
+// Returns false if the data does not have a valid ID3v2 header.
+func readID3v2(r io.Reader) (id3Tags, bool) {
 	// Read 10-byte ID3v2 header.
 	var hdr [10]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -39,23 +40,27 @@ func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 	}
 
 	// Syncsafe integer: 4 × 7 bits.
-	tagSize := int64(hdr[6])<<21 | int64(hdr[7])<<14 | int64(hdr[8])<<7 | int64(hdr[9])
-	tagEnd := int64(10) + tagSize
+	rawTagSize := int64(hdr[6])<<21 | int64(hdr[7])<<14 | int64(hdr[8])<<7 | int64(hdr[9])
+
+	var tags id3Tags
+	tags.tagSize = 10 + rawTagSize
+
+	// Wrap in a LimitedReader so we stop at the tag boundary.
+	lr := &io.LimitedReader{R: r, N: rawTagSize}
 
 	// Skip extended header if present (flag bit 6).
 	if hdr[5]&0x40 != 0 && major >= 3 {
 		var extHdr [4]byte
-		if _, err := io.ReadFull(r, extHdr[:]); err != nil {
-			return id3Tags{}, false
+		if _, err := io.ReadFull(lr, extHdr[:]); err != nil {
+			return tags, true // partial is fine, we got tagSize
 		}
 		extSize := int64(binary.BigEndian.Uint32(extHdr[:]))
 		if major == 4 {
-			// v2.4: size is syncsafe and includes itself.
 			extSize = int64(extHdr[0])<<21 | int64(extHdr[1])<<14 | int64(extHdr[2])<<7 | int64(extHdr[3])
 			extSize -= 4
 		}
-		if _, err := r.Seek(extSize, io.SeekCurrent); err != nil {
-			return id3Tags{}, false
+		if _, err := io.CopyN(io.Discard, lr, extSize); err != nil {
+			return tags, true
 		}
 	}
 
@@ -70,51 +75,44 @@ func readID3v2(r io.ReadSeeker) (id3Tags, bool) {
 	}
 	frameHdrLen := frameIDLen + frameSizeLen + frameFlagsLen
 
-	var tags id3Tags
-	buf := make([]byte, frameHdrLen)
+	hdrBuf := make([]byte, frameHdrLen)
 
-	for {
-		pos, _ := r.Seek(0, io.SeekCurrent)
-		if pos >= tagEnd {
-			break
-		}
-
-		if _, err := io.ReadFull(r, buf); err != nil {
+	for lr.N > 0 {
+		if _, err := io.ReadFull(lr, hdrBuf); err != nil {
 			break
 		}
 
 		// Padding (all zeros) means end of frames.
-		if buf[0] == 0 {
+		if hdrBuf[0] == 0 {
 			break
 		}
 
-		frameID := string(buf[:frameIDLen])
+		frameID := string(hdrBuf[:frameIDLen])
 
 		var frameSize int64
 		if major == 2 {
-			frameSize = int64(buf[3])<<16 | int64(buf[4])<<8 | int64(buf[5])
+			frameSize = int64(hdrBuf[3])<<16 | int64(hdrBuf[4])<<8 | int64(hdrBuf[5])
 		} else if major == 4 {
-			// v2.4 uses syncsafe integers for frame size.
-			frameSize = int64(buf[4])<<21 | int64(buf[5])<<14 | int64(buf[6])<<7 | int64(buf[7])
+			frameSize = int64(hdrBuf[4])<<21 | int64(hdrBuf[5])<<14 | int64(hdrBuf[6])<<7 | int64(hdrBuf[7])
 		} else {
-			frameSize = int64(binary.BigEndian.Uint32(buf[frameIDLen : frameIDLen+4]))
+			frameSize = int64(binary.BigEndian.Uint32(hdrBuf[frameIDLen : frameIDLen+4]))
 		}
 
-		if frameSize <= 0 || pos+int64(frameHdrLen)+frameSize > tagEnd {
+		if frameSize <= 0 || frameSize > lr.N {
 			break
 		}
 
 		// Only read text frames we care about.
 		if wantTextFrame(frameID, major) && frameSize < 4096 {
 			data := make([]byte, frameSize)
-			if _, err := io.ReadFull(r, data); err != nil {
+			if _, err := io.ReadFull(lr, data); err != nil {
 				break
 			}
 			val := decodeTextFrame(data)
 			applyTag(&tags, frameID, val, major)
 		} else {
-			// Skip unwanted frames (APIC, COMM, etc.) without reading.
-			if _, err := r.Seek(frameSize, io.SeekCurrent); err != nil {
+			// Skip unwanted frames (APIC, COMM, etc.) without reading into memory.
+			if _, err := io.CopyN(io.Discard, lr, frameSize); err != nil {
 				break
 			}
 		}
@@ -246,7 +244,6 @@ func cleanGenre(s string) string {
 		if after != "" {
 			return after
 		}
-		// Numeric-only genre — return as-is for now.
 		return s[1:idx]
 	}
 	return s
