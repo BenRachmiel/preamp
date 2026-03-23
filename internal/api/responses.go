@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"net/http"
+	"strings"
 )
 
 const (
@@ -274,11 +275,20 @@ type jsonWrapper struct {
 	Response SubsonicResponse `json:"subsonic-response"`
 }
 
-func writeResponse(w http.ResponseWriter, r *http.Request, resp SubsonicResponse) {
-	format := r.FormValue("f")
-	if format == "" {
-		format = "xml"
+// responseFormat extracts the "f" query parameter without depending on
+// ParseForm, which may fail for requests with very large query strings
+// (Go's url.ParseQuery caps at 1000 values).
+func responseFormat(r *http.Request) string {
+	for _, seg := range strings.Split(r.URL.RawQuery, "&") {
+		if k, v, ok := strings.Cut(seg, "="); ok && k == "f" {
+			return v
+		}
 	}
+	return "xml"
+}
+
+func writeResponse(w http.ResponseWriter, r *http.Request, resp SubsonicResponse) {
+	format := responseFormat(r)
 
 	switch format {
 	case "json":
