@@ -200,31 +200,43 @@ func readTrack(path, ext, contentType string, log *slog.Logger) (info trackInfo,
 		size:        stat.Size(),
 	}
 
-	meta, err := tag.ReadFrom(f)
-	if err != nil {
-		// No tags — use filename as title.
-		info.title = strings.TrimSuffix(filepath.Base(path), ext)
-		info.artist = "Unknown Artist"
-		info.album = filepath.Base(filepath.Dir(path))
+	// Use lightweight ID3v2 reader for MP3 — skips APIC frames entirely
+	// instead of reading multi-MB embedded art into memory.
+	if ext == ".mp3" {
+		if tags, ok := readID3v2(f); ok {
+			info.title = tags.title
+			info.artist = tags.artist
+			info.album = tags.album
+			info.genre = tags.genre
+			info.year = tags.year
+			info.track = tags.track
+			info.disc = tags.disc
+		}
 	} else {
-		info.title = meta.Title()
-		if info.title == "" {
-			info.title = strings.TrimSuffix(filepath.Base(path), ext)
+		// Fallback to dhowden/tag for FLAC, OGG, M4A, etc.
+		meta, tagErr := tag.ReadFrom(f)
+		if tagErr == nil {
+			info.title = meta.Title()
+			info.artist = meta.Artist()
+			info.album = meta.Album()
+			info.genre = meta.Genre()
+			info.year = meta.Year()
+			t, _ := meta.Track()
+			info.track = t
+			d, _ := meta.Disc()
+			info.disc = d
 		}
-		info.artist = meta.Artist()
-		if info.artist == "" {
-			info.artist = "Unknown Artist"
-		}
-		info.album = meta.Album()
-		if info.album == "" {
-			info.album = filepath.Base(filepath.Dir(path))
-		}
-		info.genre = meta.Genre()
-		info.year = meta.Year()
-		t, _ := meta.Track()
-		info.track = t
-		d, _ := meta.Disc()
-		info.disc = d
+	}
+
+	// Fill in defaults from filename/path.
+	if info.title == "" {
+		info.title = strings.TrimSuffix(filepath.Base(path), ext)
+	}
+	if info.artist == "" {
+		info.artist = "Unknown Artist"
+	}
+	if info.album == "" {
+		info.album = filepath.Base(filepath.Dir(path))
 	}
 
 	// Parse duration from the same open file handle (avoids a second open).
