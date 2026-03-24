@@ -50,7 +50,7 @@ spec:
               value: {{ .Values.config.listen | quote }}
             - name: PREAMP_CREDENTIAL_TTL
               value: {{ .Values.config.credentialTTL | quote }}
-            {{- if not .Values.ui.enabled }}
+            {{- if and (not .Values.ui.enabled) .Values.devCredentials.username }}
             - name: PREAMP_NO_AUTH
               value: "1"
             - name: PREAMP_DEV_USERNAME
