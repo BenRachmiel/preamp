@@ -7,8 +7,12 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -105,13 +109,40 @@ jobs:
     needs: [test, test-ui]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      chart-version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: azure/setup-helm@v5
 
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Bump chart version
+        id: version
+        run: |
+          cd chart/preamp
+          CURRENT=$(grep '^version:' Chart.yaml | awk '{print $2}')
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          sed -i "s/^version: .*/version: $NEXT/" Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"$NEXT\"/" Chart.yaml
+          echo "CHART_VERSION=$NEXT" >> "$GITHUB_ENV"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push chart changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add chart/preamp/Chart.yaml
+          git diff --cached --quiet || git commit -m "chart: bump to $CHART_VERSION"
+          git push
 
       - name: Package and push chart
         run: |
@@ -124,23 +155,19 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Extract chart version and short SHA
+      - name: Extract short SHA
         id: meta
-        run: |
-          echo "short=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "chart=$(grep '^version:' chart/preamp/Chart.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        run: echo "short=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.RIG_DISPATCH_TOKEN }}
           repository: BenRachmiel/rig
           event-type: subchart-update
-          client-payload: '{"source":"preamp","chartVersion":"${{ steps.meta.outputs.chart }}","imageTag":"${{ steps.meta.outputs.short }}"}'
+          client-payload: '{"source":"preamp","chartVersion":"${{ needs.helm.outputs.chart-version }}","imageTag":"${{ steps.meta.outputs.short }}"}'
 
   update-gitops:
-    needs: [build-server, build-ui]
+    needs: [build-server, build-ui, helm]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -148,14 +175,17 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.TALOS_CLUSTER_DEPLOY_KEY }}
 
-      - name: Update image tags in talos-cluster
+      - name: Update talos-cluster
+        env:
+          CHART_VERSION: ${{ needs.helm.outputs.chart-version }}
         run: |
           TAG="sha-${GITHUB_SHA::7}"
           git clone git@github.com:BenRachmiel/talos-cluster.git
           cd talos-cluster
           sed -i "s/tag: sha-[a-f0-9]*/tag: $TAG/g" apps/preamp/values.yaml
+          sed -i "s/chartVersion: .*/chartVersion: $CHART_VERSION/" apps/preamp/config.yaml
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add apps/preamp/values.yaml
-          git diff --cached --quiet || git commit -m "preamp: update images to $TAG"
+          git add apps/preamp/values.yaml apps/preamp/config.yaml
+          git diff --cached --quiet || git commit -m "preamp: $CHART_VERSION / $TAG"
           git push
