@@ -145,7 +145,8 @@ jobs:
           git push
 
       - name: Bake image tags into chart defaults
-        run: sed -i "s/tag: latest/tag: sha-${GITHUB_SHA::7}/" chart/preamp/values.yaml
+        run: |
+          sed -i "s/tag: latest/tag: sha-${GITHUB_SHA::7}/" chart/preamp/values.yaml
 
       - name: Package and push chart
         run: |
