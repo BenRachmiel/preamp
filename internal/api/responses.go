@@ -42,6 +42,7 @@ type SubsonicResponse struct {
 	TopSongs           *TopSongs              `xml:"topSongs,omitempty" json:"topSongs,omitempty"`
 	SimilarSongs2      *SimilarSongs2         `xml:"similarSongs2,omitempty" json:"similarSongs2,omitempty"`
 	User               *User                  `xml:"user,omitempty" json:"user,omitempty"`
+	LyricsList         *LyricsList            `xml:"lyricsList,omitempty" json:"lyricsList,omitempty"`
 }
 
 type APIError struct {
@@ -249,6 +250,23 @@ type User struct {
 	JukeboxRole        bool   `xml:"jukeboxRole,attr" json:"jukeboxRole"`
 	ShareRole          bool   `xml:"shareRole,attr" json:"shareRole"`
 	Folder             []int  `xml:"folder" json:"folder"`
+}
+
+// --- Lyrics types (OpenSubsonic getLyricsBySongId) ---
+
+type LyricsList struct {
+	StructuredLyrics []StructuredLyrics `xml:"structuredLyrics" json:"structuredLyrics"`
+}
+
+type StructuredLyrics struct {
+	Lang   string      `xml:"lang,attr" json:"lang"`
+	Synced bool        `xml:"synced,attr" json:"synced"`
+	Lines  []LyricLine `xml:"line" json:"line"`
+}
+
+type LyricLine struct {
+	Start *int   `xml:"start,attr,omitempty" json:"start,omitempty"`
+	Value string `xml:"value,attr" json:"value"`
 }
 
 // --- Response helpers ---

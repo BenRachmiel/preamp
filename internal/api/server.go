@@ -167,6 +167,9 @@ func (s *Server) subsonicRoutes() {
 	sub("getStarred2", s.handleGetStarred2)
 	sub("getSongsByGenre", s.handleGetSongsByGenre)
 
+	// Lyrics (OpenSubsonic)
+	sub("getLyricsBySongId", s.handleGetLyricsBySongId)
+
 	// Annotation
 	sub("star", s.handleStar)
 	sub("unstar", s.handleUnstar)

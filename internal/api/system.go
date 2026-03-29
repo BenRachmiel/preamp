@@ -16,6 +16,7 @@ func (s *Server) handleGetOpenSubsonicExtensions(w http.ResponseWriter, r *http.
 	resp := ok()
 	resp.OpenSubsonicExt = []OpenSubsonicExt{
 		{Name: "apiKeyAuthentication", Versions: []int{1}},
+		{Name: "songLyrics", Versions: []int{1}},
 	}
 	writeResponse(w, r, resp)
 }
