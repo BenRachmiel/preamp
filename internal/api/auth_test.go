@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/hex"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"zombiezen.com/go/sqlite/sqlitex"
@@ -355,6 +357,53 @@ func TestAuthExpiredAmongMultiple(t *testing.T) {
 	resp := getJSON(t, srv, fmt.Sprintf("/rest/ping?u=alice&t=%s&s=%s", token, salt))
 	if resp["status"] != "ok" {
 		t.Errorf("valid key among mixed: status = %v, want ok", resp["status"])
+	}
+}
+
+func TestAuthAPIKeyCacheHit(t *testing.T) {
+	srv := testServer(t, testServerOpts{encryptionKey: testEncryptionKey})
+	seedCredential(t, srv, "alice", "cached-key", false)
+
+	// First request — populates cache via bcrypt scan.
+	resp := getJSON(t, srv, "/rest/ping?apiKey=cached-key")
+	if resp["status"] != "ok" {
+		t.Fatalf("first request: status = %v, want ok", resp["status"])
+	}
+
+	// Second request — served from cache (same key, no bcrypt).
+	resp = getJSON(t, srv, "/rest/ping?apiKey=cached-key")
+	if resp["status"] != "ok" {
+		t.Errorf("cached request: status = %v, want ok", resp["status"])
+	}
+}
+
+func TestAuthAPIKeyCacheInvalidatedOnDelete(t *testing.T) {
+	srv := testServer(t, testServerOpts{encryptionKey: testEncryptionKey})
+	credID := seedCredential(t, srv, "alice", "delete-me-key", false)
+
+	// Authenticate to populate cache.
+	resp := getJSON(t, srv, "/rest/ping?apiKey=delete-me-key")
+	if resp["status"] != "ok" {
+		t.Fatalf("initial auth: status = %v, want ok", resp["status"])
+	}
+
+	// Delete credential via admin handler.
+	req := httptest.NewRequest("DELETE", "/admin/credentials/"+credID, nil)
+	req.Header.Set("Remote-User", "alice")
+	w := httptest.NewRecorder()
+	srv.AdminHandler().ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete credential: status %d, want 204", w.Code)
+	}
+
+	// Re-authenticate — should fail (cache was flushed, credential gone).
+	resp = getJSON(t, srv, "/rest/ping?apiKey=delete-me-key")
+	if resp["status"] != "failed" {
+		t.Errorf("post-delete auth: status = %v, want failed", resp["status"])
+	}
+	apiErr := resp["error"].(map[string]any)
+	if apiErr["code"].(float64) != 40 {
+		t.Errorf("error code = %v, want 40", apiErr["code"])
 	}
 }
 

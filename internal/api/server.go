@@ -23,6 +23,7 @@ type Server struct {
 	scanner       *scanner.Scanner
 	manageHandler http.Handler
 	authFailures  sync.Map // IP → *failureEntry
+	apiKeyCache   sync.Map // sha256(apiKey) [32]byte → *apiKeyCacheEntry
 }
 
 func NewServer(cfg *config.Config, database *db.DB, log *slog.Logger) *Server {

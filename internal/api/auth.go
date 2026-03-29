@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
@@ -22,7 +23,14 @@ import (
 const (
 	authFailureLimit    = 10
 	authFailureWindow   = 5 * time.Minute
+	apiKeyCacheTTL      = 5 * time.Minute
 )
+
+// apiKeyCacheEntry holds a cached API key → username mapping.
+type apiKeyCacheEntry struct {
+	username string
+	expiry   time.Time
+}
 
 type failureEntry struct {
 	count   atomic.Int32
@@ -183,17 +191,41 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 // authenticateAPIKey checks the provided key against all non-expired credentials
 // using bcrypt comparison. Returns the username from the matching credential.
+// Results are cached by sha256(apiKey) for up to apiKeyCacheTTL to avoid
+// repeated bcrypt scans on the hot path (stream, getCoverArt, etc.).
 func (s *Server) authenticateAPIKey(apiKey string) (string, error) {
+	cacheKey := sha256.Sum256([]byte(apiKey))
+
+	if val, ok := s.apiKeyCache.Load(cacheKey); ok {
+		entry := val.(*apiKeyCacheEntry)
+		if time.Now().Before(entry.expiry) {
+			return entry.username, nil
+		}
+		s.apiKeyCache.Delete(cacheKey)
+	}
+
 	creds, err := s.loadAllCredentials()
 	if err != nil {
 		return "", err
 	}
 	for _, c := range creds {
 		if bcrypt.CompareHashAndPassword(c.hashedAPIKey, []byte(apiKey)) == nil {
+			s.apiKeyCache.Store(cacheKey, &apiKeyCacheEntry{
+				username: c.username,
+				expiry:   time.Now().Add(apiKeyCacheTTL),
+			})
 			return c.username, nil
 		}
 	}
 	return "", fmt.Errorf("no matching credential")
+}
+
+// flushAPIKeyCache clears all cached API key entries.
+func (s *Server) flushAPIKeyCache() {
+	s.apiKeyCache.Range(func(key, _ any) bool {
+		s.apiKeyCache.Delete(key)
+		return true
+	})
 }
 
 // authenticateToken checks token auth against legacy-enabled credentials for the user.

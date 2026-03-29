@@ -234,6 +234,7 @@ func (s *Server) handleAdminDeleteCredential(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	s.flushAPIKeyCache()
 	w.WriteHeader(http.StatusNoContent)
 }
 
