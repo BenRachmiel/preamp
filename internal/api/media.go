@@ -13,8 +13,90 @@ import (
 	"zombiezen.com/go/sqlite/sqlitex"
 )
 
+// handleStream serves audio, optionally slicing to a time range.
+// Query params: startTime (seconds, float), duration (seconds, float).
+// If both are present and the format supports native slicing, only that
+// portion is returned. Otherwise the full file is served.
+
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	startStr := r.FormValue("startTime")
+	durStr := r.FormValue("duration")
+
+	if startStr != "" && durStr != "" {
+		startTime, err1 := strconv.ParseFloat(startStr, 64)
+		dur, err2 := strconv.ParseFloat(durStr, 64)
+		if err1 == nil && err2 == nil && startTime >= 0 && dur > 0 {
+			s.serveSlicedAudio(w, r, startTime, dur)
+			return
+		}
+	}
 	s.serveAudioFile(w, r)
+}
+
+// serveSlicedAudio attempts format-aware slicing; falls back to full-file serve.
+func (s *Server) serveSlicedAudio(w http.ResponseWriter, r *http.Request, startTime, duration float64) {
+	id := r.FormValue("id")
+	if id == "" {
+		writeError(w, r, 10, "missing parameter: id")
+		return
+	}
+
+	conn, put, err := s.db.ReadConn()
+	if err != nil {
+		writeError(w, r, 0, "database error")
+		return
+	}
+	defer put()
+
+	var filePath, contentType string
+	found := false
+
+	err = sqlitex.ExecuteTransient(conn, `SELECT path, content_type FROM song WHERE id = ?`, &sqlitex.ExecOptions{
+		Args: []any{id},
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			filePath = stmt.ColumnText(0)
+			contentType = stmt.ColumnText(1)
+			found = true
+			return nil
+		},
+	})
+	if err != nil || !found {
+		writeError(w, r, 70, "song not found")
+		return
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		s.log.Error("opening audio file", "path", filePath, "err", err)
+		writeError(w, r, 0, "file not accessible")
+		return
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		writeError(w, r, 0, "file not accessible")
+		return
+	}
+
+	fileSize := stat.Size()
+	ext := strings.ToLower(filepath.Ext(filePath))
+
+	var handled bool
+	switch ext {
+	case ".mp3":
+		handled = sliceMP3(w, f, fileSize, contentType, startTime, duration)
+	case ".flac":
+		handled = sliceFLAC(w, f, fileSize, contentType, startTime, duration)
+	case ".wav":
+		handled = sliceWAV(w, f, fileSize, contentType, startTime, duration)
+	}
+
+	if !handled {
+		// Unsupported format or parse failure — serve full file.
+		w.Header().Set("Content-Type", contentType)
+		http.ServeContent(w, r, filePath, stat.ModTime(), f)
+	}
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
